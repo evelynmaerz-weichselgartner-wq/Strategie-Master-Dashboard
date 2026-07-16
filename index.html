@@ -739,24 +739,33 @@ function qWeeks(q){
   if(code==='Q3') return Array.from({length:13}, (_,i)=>i+27);
   return Array.from({length:39}, (_,i)=>i+1);
 }
-function wk(n){ return 'KW'+String(n).padStart(2,'0'); }
+// Periodenschluessel muessen zum Format in kpi_values/key_result_status_history passen
+// ('2026-W08', '2026-07', 'Q3-2026') — deshalb immer mit dem Jahr der jeweiligen Zeile
+// (Rock/KPI), nicht mit einem globalen "aktuelles Jahr" arbeiten.
+function quarterYear(qFull){ return parseInt((qFull||'').split('-')[1], 10) || CURRENT_YEAR; }
+function wk(n, year){ return (year||CURRENT_YEAR)+'-W'+String(n).padStart(2,'0'); }
 
 const QUARTER_MONTHS = { Q1:[1,2,3], Q2:[4,5,6], Q3:[7,8,9] };
 const MONTH_NAMES = {1:'Jan',2:'Feb',3:'Mär',4:'Apr',5:'Mai',6:'Jun',7:'Jul',8:'Aug',9:'Sep',10:'Okt',11:'Nov',12:'Dez'};
-function monthKey(m){ return 'M'+String(m).padStart(2,'0'); }
+function monthKey(m, year){ return (year||CURRENT_YEAR)+'-'+String(m).padStart(2,'0'); }
 
 /* Generic period handling per KPI-Rhythmus (weekly / monthly / quarterly).
    quarter kann sowohl der reine Code ('Q3') als auch die volle, jahresbehaftete
-   Form ('Q3-2026') sein — beides wird transparent unterstuetzt. */
-function periodsForQuarter(quarter, cadence){
+   Form ('Q3-2026') sein — beides wird transparent unterstuetzt. year steuert, mit
+   welchem Jahr Wochen-/Monatsschluessel gebildet werden (Standard: aktuelles Jahr). */
+function periodsForQuarter(quarter, cadence, year){
   const code = quarterCode(quarter);
-  if(cadence==='monthly') return QUARTER_MONTHS[code].map(monthKey);
+  const yr = year || CURRENT_YEAR;
+  if(cadence==='monthly') return QUARTER_MONTHS[code].map(function(m){ return monthKey(m, yr); });
   if(cadence==='quarterly') return [quarter];
-  return qWeeks(code).map(wk); // weekly (default)
+  return qWeeks(code).map(function(n){ return wk(n, yr); }); // weekly (default)
 }
 function periodLabel(key){
-  if(key[0]==='M') return MONTH_NAMES[parseInt(key.slice(1),10)];
-  return key; // KW.. or Q..
+  const mMonth = /^\d{4}-(\d{2})$/.exec(key);
+  if(mMonth) return MONTH_NAMES[parseInt(mMonth[1],10)];
+  const mWeek = /-W(\d+)$/.exec(key);
+  if(mWeek) return 'KW'+mWeek[1];
+  return key; // Qx-YYYY
 }
 function groupByCategory(items, rowFn, labelSuffix){
   const cats = [];
@@ -1441,32 +1450,73 @@ function deleteIdea(id){
   deleteOperationalItemRow(id);
 }
 
-function sparkline(periods, weeklyObj, ziel, w, h, direction, okNum){
+// Liest die erste Zahl aus einem Zielkorridor-Text ("≥ 80%" -> 80, "10–20%" -> 10, "≤ 55 Tage" -> 55).
+function parseLeadingNumber(str){
+  if(typeof str !== 'string') return null;
+  const m = str.replace(',', '.').match(/-?\d+(\.\d+)?/);
+  return m ? parseFloat(m[0]) : null;
+}
+// Leitet aus vorhandenen numerischen Feldern (ziel/okNum) ODER, falls die fehlen, aus dem
+// GUT/OK/OFF-Textkorridor einen effektiven Ziel-/OK-Wert + Richtung ab — damit auch KPIs ohne
+// explizites "ziel"-Feld farblich bewertet werden koennen, solange irgendein Korridor hinterlegt ist.
+function resolveThresholds(ziel, okNum, direction, gut, ok, off){
+  let z = (typeof ziel === 'number') ? ziel : null;
+  let o = (typeof okNum === 'number') ? okNum : null;
+  let d = direction || 'high';
+  if(z===null){
+    const gutNum = parseLeadingNumber(gut);
+    if(gutNum!==null){
+      z = gutNum;
+      if(o===null){ o = parseLeadingNumber(ok); }
+      if(!direction){
+        const offNum = parseLeadingNumber(off);
+        if(offNum!==null) d = gutNum>=offNum ? 'high' : 'low';
+      }
+    }
+  }
+  return { ziel:z, okNum:o, direction:d };
+}
+// Fuer kategorische Werte (Text statt Zahl, z.B. "Ja, alle"/"Teilweise"/"Nein"): Farbe per
+// exaktem Textabgleich gegen den GUT/OK/OFF-Korridor, unabhaengig von Gross-/Kleinschreibung.
+function categoricalColor(value, gut, ok, off){
+  if(typeof value !== 'string' || !value.trim()) return null;
+  const v = value.trim().toLowerCase();
+  if(gut && v===gut.trim().toLowerCase()) return '#507255';
+  if(ok && v===ok.trim().toLowerCase()) return '#DEB664';
+  if(off && v===off.trim().toLowerCase()) return '#852E2E';
+  return null;
+}
+function sparkline(periods, weeklyObj, ziel, w, h, direction, okNum, gut, ok, off){
   w = w||130; h = h||30;
-  direction = direction || 'high';
+  const eff = resolveThresholds(ziel, okNum, direction, gut, ok, off);
+  const effZiel = eff.ziel, effOkNum = eff.okNum, effDirection = eff.direction;
   const vals = periods.map(function(p){ return weeklyObj[p]; });
   const known = vals.filter(function(v){ return typeof v === 'number'; });
-  const refVals = [ziel, okNum].filter(function(v){ return typeof v === 'number'; });
+  const refVals = [effZiel, effOkNum].filter(function(v){ return typeof v === 'number'; });
   const max = Math.max.apply(null, refVals.concat(known.length?known:[1], [1]));
   const barW = w/periods.length;
   let bars = '';
   periods.forEach(function(p,i){
     const v = weeklyObj[p];
-    const has = typeof v === 'number';
-    const bh = has ? Math.max(2,(v/max)*h) : 2;
+    const isNum = typeof v === 'number';
+    const isCat = typeof v === 'string' && v!=='';
+    const has = isNum || isCat;
+    const bh = isNum ? Math.max(2,(v/max)*h) : (isCat ? h : 2);
     let color = '#F0F2F6';
-    if(has && typeof ziel === 'number'){
-      const good = direction==='low' ? v<=ziel : v>=ziel;
-      const okThresh = typeof okNum === 'number' ? okNum : (direction==='low' ? ziel*1.4 : ziel*0.6);
-      const medium = direction==='low' ? v<=okThresh : v>=okThresh;
+    if(isNum && typeof effZiel === 'number'){
+      const good = effDirection==='low' ? v<=effZiel : v>=effZiel;
+      const okThresh = typeof effOkNum === 'number' ? effOkNum : (effDirection==='low' ? effZiel*1.4 : effZiel*0.6);
+      const medium = effDirection==='low' ? v<=okThresh : v>=okThresh;
       color = good ? '#507255' : (medium ? '#DEB664' : '#852E2E');
+    } else if(isCat){
+      color = categoricalColor(v, gut, ok, off) || '#858890';
     } else if(has) {
       color = '#858890';
     }
     bars += '<rect x="'+(i*barW+1)+'" y="'+(h-bh)+'" width="'+(barW-2)+'" height="'+bh+'" fill="'+color+'"></rect>';
   });
-  const zielY = (typeof ziel === 'number') ? h - Math.min(h,(ziel/max)*h) : null;
-  const zielLine = (typeof ziel === 'number') ? '<line x1="0" y1="'+zielY+'" x2="'+w+'" y2="'+zielY+'" stroke="#282422" stroke-width="1" stroke-dasharray="2,2"></line>' : '';
+  const zielY = (typeof effZiel === 'number') ? h - Math.min(h,(effZiel/max)*h) : null;
+  const zielLine = (typeof effZiel === 'number') ? '<line x1="0" y1="'+zielY+'" x2="'+w+'" y2="'+zielY+'" stroke="#282422" stroke-width="1" stroke-dasharray="2,2"></line>' : '';
   return '<svg width="'+w+'" height="'+h+'" viewBox="0 0 '+w+' '+h+'">'+bars+zielLine+'</svg>';
 }
 function latestValue(periods, weeklyObj){
@@ -1494,6 +1544,7 @@ function renderPersonChips(){
 
 function renderRockCard(rock){
   const weeks = qWeeks(rock.quarter);
+  const rockYear = quarterYear(rock.quarter);
   const closedInfo = rock.closed ? (
     '<div class="info-box">Review: '+(rock.closed.result==='done'?'Ziel erreicht':(rock.closed.result==='late'?'Verspätet gestartet':'Ziel nicht erreicht'))+
     (rock.closed.pct!==null && rock.closed.pct!==undefined ? ' · '+rock.closed.pct+'% erreicht' : '')+
@@ -1502,9 +1553,10 @@ function renderRockCard(rock){
   const archivedBadge = rock.status==='archived' ? ' <span class="badge badge-light">archiviert</span>' : '';
   const krHtml = rock.krs.map(function(kr){
     const dots = weeks.map(function(n){
-      const raw = kr.weekly[wk(n)];
+      const wkKey = wk(n, rockYear);
+      const raw = kr.weekly[wkKey];
       const st = normStatus(raw);
-      return '<div class="wk-dot '+st+'" title="'+wk(n)+': '+(st==='none'?'keine Meldung':st)+'" onclick="cycleKrStatus(\''+rock.id+'\',\''+kr.id+'\',\''+wk(n)+'\')"></div>';
+      return '<div class="wk-dot '+st+'" title="'+wkKey+': '+(st==='none'?'keine Meldung':st)+'" onclick="cycleKrStatus(\''+rock.id+'\',\''+kr.id+'\',\''+wkKey+'\')"></div>';
     }).join('');
     return '<div class="kr-block"><div class="kr-text">'+kr.text+'</div><div class="weekrow">'+dots+'</div></div>';
   }).join('');
@@ -1576,9 +1628,9 @@ function renderKpiRow(k, quarter){
   // gleicher Person+Metrik) mit angezeigt, aber nur die eigene Zeile bleibt editierbar.
   const isQuarterly = cadence==='quarterly';
   const hist = isQuarterly ? quarterlyHistory(k, 3) : null;
-  const periods = isQuarterly ? hist.periods : periodsForQuarter(quarter, cadence);
+  const periods = isQuarterly ? hist.periods : periodsForQuarter(quarter, cadence, quarterYear(k.quarter));
   const weeklyForDisplay = isQuarterly ? hist.weekly : k.weekly;
-  const spark = sparkline(periods, weeklyForDisplay, k.ziel, null, null, k.direction, k.okNum);
+  const spark = sparkline(periods, weeklyForDisplay, k.ziel, null, null, k.direction, k.okNum, k.gut, k.ok, k.off);
   const latest = latestValue(periods, weeklyForDisplay);
   const arrow = trendArrow(periods, weeklyForDisplay);
   const rowId = 'kpi-'+k.id;
@@ -1851,10 +1903,11 @@ function populateFilterSelects(){
 
 function rockLatestStatus(rock){
   const weeks = qWeeks(rock.quarter);
+  const rockYear = quarterYear(rock.quarter);
   const counts = {on:0, risk:0, off:0};
   rock.krs.forEach(function(kr){
     for(let i=weeks.length-1;i>=0;i--){
-      const raw = kr.weekly[wk(weeks[i])];
+      const raw = kr.weekly[wk(weeks[i], rockYear)];
       if(raw!==undefined){
         const st = normStatus(raw);
         if(st==='on' || st==='risk' || st==='off') counts[st]++;
@@ -1893,11 +1946,13 @@ function renderRocksOverview(){
   el.innerHTML = rocks.map(function(rock){
     const st = rockLatestStatus(rock);
     const weeks = qWeeks(rock.quarter);
+    const rockYear = quarterYear(rock.quarter);
     const archivedBadge = rock.status==='archived' ? ' <span class="badge badge-light">archiviert</span>' : '';
     const krsHtml = rock.krs.map(function(kr){
       const dots = weeks.map(function(n){
-        const raw = kr.weekly[wk(n)]; const s = normStatus(raw);
-        return '<div class="wk-dot '+s+'" title="'+wk(n)+'" onclick="cycleKrStatus(\''+rock.id+'\',\''+kr.id+'\',\''+wk(n)+'\')"></div>';
+        const wkKey = wk(n, rockYear);
+        const raw = kr.weekly[wkKey]; const s = normStatus(raw);
+        return '<div class="wk-dot '+s+'" title="'+wkKey+'" onclick="cycleKrStatus(\''+rock.id+'\',\''+kr.id+'\',\''+wkKey+'\')"></div>';
       }).join('');
       return '<div class="kr-block"><div class="kr-text">'+kr.text+'</div><div class="weekrow">'+dots+'</div></div>';
     }).join('');
