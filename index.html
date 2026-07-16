@@ -1521,9 +1521,16 @@ function sparkline(periods, weeklyObj, ziel, w, h, direction, okNum, gut, ok, of
     let color = '#F0F2F6';
     if(isNum && typeof effZiel === 'number'){
       const good = effDirection==='low' ? v<=effZiel : v>=effZiel;
-      const okThresh = typeof effOkNum === 'number' ? effOkNum : (effDirection==='low' ? effZiel*1.4 : effZiel*0.6);
-      const medium = effDirection==='low' ? v<=okThresh : v>=okThresh;
-      color = good ? '#507255' : (medium ? '#DEB664' : '#852E2E');
+      if(good){
+        color = '#507255';
+      } else if(typeof effOkNum === 'number'){
+        // Echter OK-Schwellwert vorhanden (aus okNum oder dem OK-Textkorridor) -> 3 Stufen.
+        const medium = effDirection==='low' ? v<=effOkNum : v>=effOkNum;
+        color = medium ? '#DEB664' : '#852E2E';
+      } else {
+        // Nur ein Ziel, kein echter OK-Zwischenwert -> einfache Ja/Nein-Bewertung ohne erfundene Mittelstufe.
+        color = '#852E2E';
+      }
     } else if(isCat){
       color = categoricalColor(v, gut, ok, off) || '#858890';
     } else if(has) {
