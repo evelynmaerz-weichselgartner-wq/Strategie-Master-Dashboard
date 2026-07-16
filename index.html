@@ -816,6 +816,26 @@ let storageAvailable = true;
 const CURRENT_YEAR = new Date().getFullYear();
 function quarterCode(full){ return (full||'').split('-')[0]; }
 function fullQuarter(code, year){ return code + '-' + (year || CURRENT_YEAR); }
+// Sortierschluessel fuer volle Quartalsstrings ('Q3-2026' -> 20263), damit sich
+// quartalsweise KPIs chronologisch ueber Jahresgrenzen hinweg vergleichen lassen.
+function quarterSortKey(qFull){
+  const bits = (qFull||'').split('-');
+  const qnum = parseInt(quarterCode(qFull).slice(1), 10) || 0;
+  const year = parseInt(bits[1], 10) || CURRENT_YEAR;
+  return year*10 + qnum;
+}
+// Findet die anderen Zeilen derselben quartalsweisen KPI (gleiche Person+Metrik+Typ,
+// je eine Zeile pro Quartal) und liefert die letzten `count` Quartale bis einschliesslich
+// der eigenen Zeile von k — fuer den Quartalsvergleich in renderKpiRow.
+function quarterlyHistory(k, count){
+  const siblings = DATA.kpis.filter(function(x){ return x.person===k.person && x.metric===k.metric && x.type===k.type; })
+    .slice().sort(function(a,b){ return quarterSortKey(a.quarter)-quarterSortKey(b.quarter); });
+  const idx = siblings.findIndex(function(s){ return s.id===k.id; });
+  const windowRows = siblings.slice(Math.max(0, idx-(count-1)), idx+1);
+  const weekly = {};
+  windowRows.forEach(function(r){ weekly[r.quarter] = r.weekly[r.quarter]; });
+  return { periods: windowRows.map(function(r){ return r.quarter; }), weekly: weekly };
+}
 
 let PERSON_ID_BY_NAME = {};
 let PERSON_NAME_BY_ID = {};
@@ -893,7 +913,7 @@ async function fetchAllData(){
     const ex = r.extra || {}; return { id:r.id, wer:r.wer, text:r.text_content, kategorie:r.category, prioritaet:ex.prioritaet, status:r.status, quarter:r.quarter, archived:!!r.archived };
   });
   const feedback = opRows.filter(function(r){ return r.list_type==='feedback'; }).map(function(r){
-    const ex = r.extra || {}; return { id:r.id, typ:ex.typ, text:r.text_content, kategorie:r.category, datum:ex.datum, quelle:ex.quelle };
+    const ex = r.extra || {}; return { id:r.id, typ:ex.typ, text:r.text_content, wer:r.wer, datum:ex.datum, quelle:ex.quelle };
   });
   const www = opRows.filter(function(r){ return r.list_type==='www'; }).map(function(r){
     const ex = r.extra || {}; return { id:r.id, wer:r.wer, was:r.text_content, bisWann:ex.bis_wann, status:r.status };
@@ -1206,7 +1226,7 @@ function renderOperativ(){
     return '<div class="op-row">'+
       '<div class="op-field"><b>Typ</b>'+f.typ+'</div>'+
       '<div class="op-field" style="flex:2;"><b>Feedback</b>'+f.text+'</div>'+
-      '<div class="op-field"><b>Kategorie</b>'+(f.kategorie||'–')+'</div>'+
+      '<div class="op-field"><b>Wer</b>'+(f.wer||'–')+'</div>'+
       '<div class="op-field"><b>Datum</b>'+(f.datum||'–')+'</div>'+
       '<div class="op-field"><b>Quelle</b>'+(f.quelle||'–')+'</div>'+
       '<button class="del-btn" title="bearbeiten" style="color:var(--gold-hover);" onclick="editFeedback(\''+f.id+'\')">✎</button>'+
@@ -1249,7 +1269,7 @@ function operationalItemToRow(listName, item){
     return Object.assign(base, { wer: item.wer, text_content: item.text, category: item.kategorie||null, status: item.status||'offen', quarter: item.quarter||null, archived: !!item.archived, extra: { prioritaet: item.prioritaet||null } });
   }
   if(singular==='feedback'){
-    return Object.assign(base, { wer: null, text_content: item.text, category: item.kategorie||null, status: 'offen', quarter: null, archived: false, extra: { typ: item.typ, quelle: item.quelle||null, datum: item.datum||null } });
+    return Object.assign(base, { wer: item.wer||null, text_content: item.text, category: null, status: 'offen', quarter: null, archived: false, extra: { typ: item.typ, quelle: item.quelle||null, datum: item.datum||null } });
   }
   if(singular==='www'){
     return Object.assign(base, { wer: item.wer, text_content: item.was, category: null, status: item.status||'offen', quarter: null, archived: false, extra: { bis_wann: item.bisWann||null } });
@@ -1275,7 +1295,7 @@ function addIssue(){
     {key:'wer', label:'Wer meldet das Issue?', required:true},
     {key:'text', label:'Worum geht es?', type:'textarea', required:true},
     {key:'kategorie', label:'Kategorie (z. B. Prozess, IT, Produkt)', placeholder:'optional'},
-    {key:'prioritaet', label:'Priorität (hoch / mittel / niedrig)', placeholder:'optional'},
+    {key:'prioritaet', label:'Priorität (1 = hoch, 3 = niedrig)', type:'select', options:['1','2','3'], value:'2'},
     {key:'quarter', label:'Quartal', type:'select', options:['Q1','Q2','Q3'], value:'Q3'},
   ], 'Issue speichern', function(v){
     pushUndo();
@@ -1298,7 +1318,7 @@ function editIssue(id){
     {key:'wer', label:'Wer meldet das Issue?', value:item.wer, required:true},
     {key:'text', label:'Worum geht es?', type:'textarea', value:item.text, required:true},
     {key:'kategorie', label:'Kategorie', value:item.kategorie||''},
-    {key:'prioritaet', label:'Priorität', type:'select', options:['hoch','mittel','niedrig'], value:item.prioritaet||'mittel'},
+    {key:'prioritaet', label:'Priorität (1 = hoch, 3 = niedrig)', type:'select', options:['1','2','3'], value:item.prioritaet||'2'},
     {key:'status', label:'Status', type:'select', options:['offen','kommuniziert','erledigt'], value:item.status||'offen'},
     {key:'quarter', label:'Quartal', type:'select', options:['Q1','Q2','Q3'], value:item.quarter||'Q3'},
   ], 'Speichern', function(v){
@@ -1318,12 +1338,12 @@ function addFeedback(){
   openModal('Neues Feedback', '', [
     {key:'typ', label:'Typ', type:'select', options:['Team','Kunde'], value:'Team'},
     {key:'text', label:'Feedback-Text', type:'textarea', required:true},
-    {key:'kategorie', label:'Kategorie', placeholder:'optional'},
+    {key:'wer', label:'Wer hat das Feedback eingeholt?', required:true},
     {key:'quelle', label:'Quelle (z. B. Zendesk, Gespräch, Umfrage)', placeholder:'optional'},
   ], 'Feedback speichern', function(v){
     pushUndo();
     const datum = new Date().toISOString().slice(0,10);
-    const item = { id: uid(), typ: v.typ, text: v.text, kategorie: v.kategorie, datum: datum, quelle: v.quelle };
+    const item = { id: uid(), typ: v.typ, text: v.text, wer: v.wer, datum: datum, quelle: v.quelle };
     DATA.feedback.push(item);
     rerenderAll();
     persistOperationalItem(operationalItemToRow('feedback', item));
@@ -1341,11 +1361,11 @@ function editFeedback(id){
   openModal('Feedback bearbeiten', '', [
     {key:'typ', label:'Typ', type:'select', options:['Team','Kunde'], value:item.typ},
     {key:'text', label:'Feedback-Text', type:'textarea', value:item.text, required:true},
-    {key:'kategorie', label:'Kategorie', value:item.kategorie||''},
+    {key:'wer', label:'Wer hat das Feedback eingeholt?', value:item.wer||'', required:true},
     {key:'quelle', label:'Quelle', value:item.quelle||''},
   ], 'Speichern', function(v){
     pushUndo();
-    item.typ = v.typ; item.text = v.text; item.kategorie = v.kategorie; item.quelle = v.quelle;
+    item.typ = v.typ; item.text = v.text; item.wer = v.wer; item.quelle = v.quelle;
     rerenderAll();
     persistOperationalItem(operationalItemToRow('feedback', item));
   });
@@ -1355,7 +1375,7 @@ function addWWW(){
   openModal('Neuer WWW-Punkt', '"Just Fucking Do It" — schnell erledigt, nicht groß geplant.', [
     {key:'wer', label:'Wer übernimmt es?', required:true},
     {key:'was', label:'Was ist zu tun?', type:'textarea', required:true},
-    {key:'bisWann', label:'Bis wann?', placeholder:'optional, z. B. Freitag'},
+    {key:'bisWann', label:'Bis wann?', type:'date'},
   ], 'WWW-Punkt speichern', function(v){
     pushUndo();
     const item = { id: uid(), wer: v.wer, was: v.was, bisWann: v.bisWann, status: 'offen' };
@@ -1376,7 +1396,7 @@ function editWWW(id){
   openModal('WWW-Punkt bearbeiten', '', [
     {key:'wer', label:'Wer übernimmt es?', value:item.wer, required:true},
     {key:'was', label:'Was ist zu tun?', type:'textarea', value:item.was, required:true},
-    {key:'bisWann', label:'Bis wann?', value:item.bisWann||''},
+    {key:'bisWann', label:'Bis wann?', type:'date', value:item.bisWann||''},
     {key:'status', label:'Status', type:'select', options:['offen','in Arbeit','gelöst'], value:item.status||'offen'},
   ], 'Speichern', function(v){
     pushUndo();
@@ -1549,17 +1569,29 @@ function editRock(rockId){
 
 function renderKpiRow(k, quarter){
   const cadence = k.cadence || 'weekly';
-  const periods = periodsForQuarter(quarter, cadence);
-  const spark = sparkline(periods, k.weekly, k.ziel, null, null, k.direction, k.okNum);
-  const latest = latestValue(periods, k.weekly);
-  const arrow = trendArrow(periods, k.weekly);
+  // Quartalsweise KPIs sind jetzt je eine Zeile pro Quartal (siehe kpis-Schema) — der
+  // relevante Periodenschluessel ist deshalb immer die eigene volle Quartalsangabe der
+  // Zeile (k.quarter), nicht die gerade angezeigte Ansicht. Fuer die Vergleichbarkeit
+  // werden zusaetzlich die letzten Quartale derselben Kennzahl (andere KPI-Zeilen mit
+  // gleicher Person+Metrik) mit angezeigt, aber nur die eigene Zeile bleibt editierbar.
+  const isQuarterly = cadence==='quarterly';
+  const hist = isQuarterly ? quarterlyHistory(k, 3) : null;
+  const periods = isQuarterly ? hist.periods : periodsForQuarter(quarter, cadence);
+  const weeklyForDisplay = isQuarterly ? hist.weekly : k.weekly;
+  const spark = sparkline(periods, weeklyForDisplay, k.ziel, null, null, k.direction, k.okNum);
+  const latest = latestValue(periods, weeklyForDisplay);
+  const arrow = trendArrow(periods, weeklyForDisplay);
   const rowId = 'kpi-'+k.id;
   const cadenceLabel = {weekly:'wöchentlich erfassen',monthly:'monatlich erfassen',quarterly:'einmal pro Quartal erfassen'}[cadence];
   const isNumeric = (k.ziel!==null && k.ziel!==undefined) || (typeof k.okNum === 'number');
   const inputType = isNumeric ? 'number' : 'text';
   const inputs = periods.map(function(p){
-    const v = k.weekly[p];
+    const v = weeklyForDisplay[p];
     const vv = (v!==undefined && v!==null) ? v : '';
+    const editable = !isQuarterly || p===k.quarter;
+    if(!editable){
+      return '<div class="kpi-input-cell"><label>'+periodLabel(p)+'</label><input type="'+inputType+'" value="'+vv+'" disabled style="opacity:.55;" title="Vorheriges Quartal — zum Bearbeiten dort ansehen"></div>';
+    }
     return '<div class="kpi-input-cell"><label>'+periodLabel(p)+'</label><input type="'+inputType+'" '+(isNumeric?'step="any"':'')+' value="'+vv+'" onchange="setKpiValue(\''+k.id+'\',\''+p+'\',this.value,'+isNumeric+')"></div>';
   }).join('');
   const archivedBadge = k.status==='archived' ? ' <span class="badge badge-light">archiviert</span>' : '';
