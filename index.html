@@ -1456,10 +1456,22 @@ function parseLeadingNumber(str){
   const m = str.replace(',', '.').match(/-?\d+(\.\d+)?/);
   return m ? parseFloat(m[0]) : null;
 }
+// Letzter Rueckfall fuer Gold-Hebel ohne jegliches Ziel/Korridor: manche Aktivitaets-
+// Beschreibungen nennen die Wochenzahl direkt im Text ("1 Trend-Contentpiece pro Woche",
+// "Employer Branding: 2 LinkedIn-Post veroeffentlichen"). Bewusst vorsichtig: Bereiche wie
+// "1–2 Key Players" werden NICHT geraten (koennte die falsche Zahl aus dem Bereich greifen
+// und faelschlich als Wochenziel interpretieren) — lieber grau bleiben als falsch bewerten.
+function parseTargetFromMetricText(text){
+  if(typeof text !== 'string') return null;
+  if(/\d+\s*[-–]\s*\d+/.test(text)) return null;
+  const m = text.match(/(^|[^(\d])(\d+)(?!\s*[-–])/);
+  return m ? parseInt(m[2], 10) : null;
+}
 // Leitet aus vorhandenen numerischen Feldern (ziel/okNum) ODER, falls die fehlen, aus dem
-// GUT/OK/OFF-Textkorridor einen effektiven Ziel-/OK-Wert + Richtung ab — damit auch KPIs ohne
-// explizites "ziel"-Feld farblich bewertet werden koennen, solange irgendein Korridor hinterlegt ist.
-function resolveThresholds(ziel, okNum, direction, gut, ok, off){
+// GUT/OK/OFF-Textkorridor oder (als letzter Rueckfall) aus dem Metrik-Namen selbst einen
+// effektiven Ziel-/OK-Wert + Richtung ab — damit auch KPIs ohne explizites "ziel"-Feld
+// farblich bewertet werden koennen, solange irgendein Anhaltspunkt hinterlegt ist.
+function resolveThresholds(ziel, okNum, direction, gut, ok, off, metricText){
   let z = (typeof ziel === 'number') ? ziel : null;
   let o = (typeof okNum === 'number') ? okNum : null;
   let d = direction || 'high';
@@ -1474,6 +1486,10 @@ function resolveThresholds(ziel, okNum, direction, gut, ok, off){
       }
     }
   }
+  if(z===null){
+    const textNum = parseTargetFromMetricText(metricText);
+    if(textNum!==null) z = textNum;
+  }
   return { ziel:z, okNum:o, direction:d };
 }
 // Fuer kategorische Werte (Text statt Zahl, z.B. "Ja, alle"/"Teilweise"/"Nein"): Farbe per
@@ -1486,9 +1502,9 @@ function categoricalColor(value, gut, ok, off){
   if(off && v===off.trim().toLowerCase()) return '#852E2E';
   return null;
 }
-function sparkline(periods, weeklyObj, ziel, w, h, direction, okNum, gut, ok, off){
+function sparkline(periods, weeklyObj, ziel, w, h, direction, okNum, gut, ok, off, metricText){
   w = w||130; h = h||30;
-  const eff = resolveThresholds(ziel, okNum, direction, gut, ok, off);
+  const eff = resolveThresholds(ziel, okNum, direction, gut, ok, off, metricText);
   const effZiel = eff.ziel, effOkNum = eff.okNum, effDirection = eff.direction;
   const vals = periods.map(function(p){ return weeklyObj[p]; });
   const known = vals.filter(function(v){ return typeof v === 'number'; });
@@ -1630,7 +1646,7 @@ function renderKpiRow(k, quarter){
   const hist = isQuarterly ? quarterlyHistory(k, 3) : null;
   const periods = isQuarterly ? hist.periods : periodsForQuarter(quarter, cadence, quarterYear(k.quarter));
   const weeklyForDisplay = isQuarterly ? hist.weekly : k.weekly;
-  const spark = sparkline(periods, weeklyForDisplay, k.ziel, null, null, k.direction, k.okNum, k.gut, k.ok, k.off);
+  const spark = sparkline(periods, weeklyForDisplay, k.ziel, null, null, k.direction, k.okNum, k.gut, k.ok, k.off, k.metric);
   const latest = latestValue(periods, weeklyForDisplay);
   const arrow = trendArrow(periods, weeklyForDisplay);
   const rowId = 'kpi-'+k.id;
@@ -1788,12 +1804,13 @@ function addGoldhebel(person){
     ownerSelectField('Zuständig/Owner', 'owner', null, person),
     {key:'detail', label:'Detail/Beschreibung', type:'textarea', rows:2, placeholder:'optional'},
     {key:'rhythm', label:'Rhythmus', type:'select', options:['wöchentlich','täglich','monatlich','quartalsweise','pro Stelle','pro Neueinstellung','pro Austritt'], value:'wöchentlich'},
+    {key:'ziel', label:'Ziel pro Zeitraum (Zahl, optional — steuert die farbliche Bewertung)', type:'number', placeholder:'z. B. 2'},
   ], 'Gold-Hebel speichern', function(v){
     pushUndo();
     const k = {
       id: uid(), person: person, owner: v.owner, metric: v.title, detailText: v.detail||null,
       type: 'goldhebel', category: v.category||null, cadence: goldhebelCadence({rhythm:v.rhythm}), direction: 'high',
-      gut:null, ok:null, off:null, gutLabel:null, okLabel:null, offLabel:null, ziel:null, okNum:null,
+      gut:null, ok:null, off:null, gutLabel:null, okLabel:null, offLabel:null, ziel: v.ziel!=='' ? parseFloat(v.ziel) : null, okNum:null,
       rhythm: v.rhythm, datenquelle:null, dataSourceType:'manual', quarter: fullQuarter(personQuarterSel), status:'active', weekly: {}
     };
     DATA.kpis.push(k);
@@ -1810,6 +1827,7 @@ function editGoldhebel(id){
     ownerSelectField('Zuständig/Owner', 'owner', g.owner, g.person),
     {key:'detail', label:'Detail/Beschreibung', type:'textarea', rows:2, value:g.detailText||''},
     {key:'rhythm', label:'Rhythmus', type:'select', options:['wöchentlich','täglich','monatlich','quartalsweise','pro Stelle','pro Neueinstellung','pro Austritt'], value:g.rhythm||'wöchentlich'},
+    {key:'ziel', label:'Ziel pro Zeitraum (Zahl, optional — steuert die farbliche Bewertung)', type:'number', value:(g.ziel!==null&&g.ziel!==undefined?g.ziel:''), placeholder:'z. B. 2'},
   ], 'Speichern', function(v){
     pushUndo();
     g.category = v.category || null;
@@ -1818,6 +1836,7 @@ function editGoldhebel(id){
     g.detailText = v.detail || null;
     g.rhythm = v.rhythm;
     g.cadence = goldhebelCadence({rhythm:v.rhythm});
+    g.ziel = v.ziel!=='' ? parseFloat(v.ziel) : null;
     rerenderAll();
     persistKpi(g);
   });
