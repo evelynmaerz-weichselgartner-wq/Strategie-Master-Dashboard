@@ -489,6 +489,7 @@
       <div><label>Person</label><select id="rf-person"></select></div>
       <div><label>Quartal</label><select id="rf-quarter"><option value="ALL">Alle</option><option value="Q1">Q1 2026</option><option value="Q2">Q2 2026</option><option value="Q3" selected>Q3 2026</option></select></div>
       <div><label>Status (aktuelle Woche je Rock)</label><select id="rf-status"><option value="ALL">Alle</option><option value="on">On Track</option><option value="risk">At Risk</option><option value="off">Off Track</option><option value="none">Keine Meldung</option></select></div>
+      <div><label>Archiviert</label><select id="rf-archived"><option value="ALL">Alle</option><option value="NO" selected>Nicht archiviert</option><option value="YES">Nur archiviert</option></select></div>
     </div>
     <div id="rocks-overview-list"></div>
   </div>
@@ -502,6 +503,7 @@
       <div><label>Quartal (Zeitraum)</label><select id="kf-quarter"><option value="Q1">Q1 2026</option><option value="Q2">Q2 2026</option><option value="Q3" selected>Q3 2026</option></select></div>
       <div><label>Rhythmus</label><select id="kf-cadence"><option value="ALL">Alle</option><option value="weekly">Wöchentlich</option><option value="monthly">Monatlich</option><option value="quarterly">Quartalsweise</option></select></div>
       <div><label>Typ</label><select id="kf-type"><option value="ALL">Alle</option><option value="kpi">Nur KPIs</option><option value="goldhebel">Nur Gold-Hebel</option></select></div>
+      <div><label>Archiviert</label><select id="kf-archived"><option value="ALL">Alle</option><option value="NO" selected>Nicht archiviert</option><option value="YES">Nur archiviert</option></select></div>
     </div>
     <div class="card" id="kpi-overview-list" style="padding-top:.6rem;"></div>
   </div>
@@ -572,7 +574,7 @@ function undoLastChange(){
   renderRocksOverview();
   renderKpiOverview();
   renderOperativ();
-  saveData();
+  repersistSnapshot(DATA).catch(function(e){ console.error('Rueckgaengig: Neupersistieren teilweise fehlgeschlagen', e); });
   updateUndoButton();
 }
 function updateUndoButton(){
@@ -616,30 +618,26 @@ function mergeImportedData(imported){
     });
   });
 
-  // KPIs: fehlende (per Person+Metrik) ergänzen; bestehende KPIs um fehlende Wochenwerte ergänzen
+  // KPIs (inkl. Gold-Hebel): fehlende (per Person+Metrik+Quartal) ergänzen; bestehende um fehlende Wochenwerte ergänzen
   (imported.kpis||[]).forEach(function(impK){
-    const cur = DATA.kpis.find(function(k){ return k.person===impK.person && k.metric===impK.metric; });
-    if(!cur){ DATA.kpis.push(JSON.parse(JSON.stringify(impK))); added.kpis++; return; }
+    const cur = DATA.kpis.find(function(k){ return k.person===impK.person && k.metric===impK.metric && k.quarter===impK.quarter; });
+    if(!cur){ const copy = JSON.parse(JSON.stringify(impK)); if(!copy.id) copy.id = crypto.randomUUID(); DATA.kpis.push(copy); added.kpis++; if(impK.type==='goldhebel') added.goldhebel++; return; }
     Object.keys(impK.weekly||{}).forEach(function(wkKey){
       if(cur.weekly[wkKey]===undefined){ cur.weekly[wkKey] = impK.weekly[wkKey]; added.weekly++; }
     });
   });
 
-  // Rollen: fehlende Personen ergänzen; bei bestehenden nur fehlende Gold-Hebel (per ID) nachtragen
+  // Rollen: fehlende Personen ergänzen (Gold-Hebel sind seit Phase 2 normale Kpis-Eintraege, s.o.)
   (imported.roles||[]).forEach(function(impRole){
     const cur = DATA.roles.find(function(r){ return r.person===impRole.person; });
-    if(!cur){ DATA.roles.push(JSON.parse(JSON.stringify(impRole))); added.roles++; return; }
-    (impRole.goldhebel||[]).forEach(function(g){
-      const exists = (cur.goldhebel||[]).some(function(x){ return x.id===g.id; });
-      if(!exists){ cur.goldhebel.push(JSON.parse(JSON.stringify(g))); added.goldhebel++; }
-    });
+    if(!cur){ DATA.roles.push(JSON.parse(JSON.stringify(impRole))); added.roles++; }
   });
 
   // Operativ-Listen: fehlende Einträge (per ID) ergänzen
   ['issues','feedback','www','ideas'].forEach(function(listName){
     (imported[listName]||[]).forEach(function(item){
       const exists = (DATA[listName]||[]).some(function(x){ return x.id===item.id; });
-      if(!exists){ DATA[listName].push(JSON.parse(JSON.stringify(item))); added[listName]++; }
+      if(!exists){ const copy = JSON.parse(JSON.stringify(item)); if(!copy.id) copy.id = crypto.randomUUID(); DATA[listName].push(copy); added[listName]++; }
     });
   });
 
@@ -676,20 +674,22 @@ function importData(){
     pushUndo();
     const added = mergeImportedData(parsed);
     closeModal();
-    saveAndRerender();
+    rerenderAll();
+    repersistSnapshot(DATA).catch(function(e){ console.error('Import: Neupersistieren teilweise fehlgeschlagen', e); });
     alertInline('Ergänzt: '+added.rocks+' Rock(s), '+added.kpis+' KPI(s), '+added.weekly+' Wochenwert(e), '+added.goldhebel+' Gold-Hebel, '+(added.issues+added.feedback+added.www+added.ideas)+' Operativ-Einträge. Nichts Bestehendes wurde verändert.');
   };
   document.getElementById('import-overwrite-btn').onclick = function(){
     const parsed = parseInput();
     if(!parsed) return;
-    openConfirmModal('Wirklich ALLES überschreiben? Alles, was seit dem Export dieser Kopie neu eingetragen wurde, geht dabei verloren.', 'Ja, komplett überschreiben', function(){
+    openConfirmModal('Wirklich ALLES überschreiben? Alles, was seit dem Export dieser Kopie neu eingetragen wurde, geht dabei verloren (in der Datenbank bereits vorhandene, im Import fehlende Zeilen werden dabei NICHT geloescht).', 'Ja, komplett überschreiben', function(){
       pushUndo();
       DATA = parsed;
       if(!DATA.issues) DATA.issues = [];
       if(!DATA.feedback) DATA.feedback = [];
       if(!DATA.www) DATA.www = [];
       if(!DATA.ideas) DATA.ideas = [];
-      saveAndRerender();
+      rerenderAll();
+      repersistSnapshot(DATA).catch(function(e){ console.error('Import: Neupersistieren teilweise fehlgeschlagen', e); });
       alertInline('Komplett überschrieben.');
     });
   };
@@ -733,9 +733,10 @@ function loadViewState(){
 
 
 function qWeeks(q){
-  if(q==='Q1') return Array.from({length:13}, (_,i)=>i+1);
-  if(q==='Q2') return Array.from({length:13}, (_,i)=>i+14);
-  if(q==='Q3') return Array.from({length:13}, (_,i)=>i+27);
+  const code = quarterCode(q);
+  if(code==='Q1') return Array.from({length:13}, (_,i)=>i+1);
+  if(code==='Q2') return Array.from({length:13}, (_,i)=>i+14);
+  if(code==='Q3') return Array.from({length:13}, (_,i)=>i+27);
   return Array.from({length:39}, (_,i)=>i+1);
 }
 function wk(n){ return 'KW'+String(n).padStart(2,'0'); }
@@ -744,17 +745,20 @@ const QUARTER_MONTHS = { Q1:[1,2,3], Q2:[4,5,6], Q3:[7,8,9] };
 const MONTH_NAMES = {1:'Jan',2:'Feb',3:'Mär',4:'Apr',5:'Mai',6:'Jun',7:'Jul',8:'Aug',9:'Sep',10:'Okt',11:'Nov',12:'Dez'};
 function monthKey(m){ return 'M'+String(m).padStart(2,'0'); }
 
-/* Generic period handling per KPI-Rhythmus (weekly / monthly / quarterly) */
+/* Generic period handling per KPI-Rhythmus (weekly / monthly / quarterly).
+   quarter kann sowohl der reine Code ('Q3') als auch die volle, jahresbehaftete
+   Form ('Q3-2026') sein — beides wird transparent unterstuetzt. */
 function periodsForQuarter(quarter, cadence){
-  if(cadence==='monthly') return QUARTER_MONTHS[quarter].map(monthKey);
+  const code = quarterCode(quarter);
+  if(cadence==='monthly') return QUARTER_MONTHS[code].map(monthKey);
   if(cadence==='quarterly') return [quarter];
-  return qWeeks(quarter).map(wk); // weekly (default)
+  return qWeeks(code).map(wk); // weekly (default)
 }
 function periodLabel(key){
   if(key[0]==='M') return MONTH_NAMES[parseInt(key.slice(1),10)];
   return key; // KW.. or Q..
 }
-function groupByCategory(items, rowFn){
+function groupByCategory(items, rowFn, labelSuffix){
   const cats = [];
   const byCat = {};
   items.forEach(function(it){
@@ -763,7 +767,7 @@ function groupByCategory(items, rowFn){
     byCat[c].push(it);
   });
   return cats.map(function(c){
-    const heading = c ? '<div class="gh-category">'+c.toUpperCase()+'-KPIS</div>' : '';
+    const heading = c ? '<div class="gh-category">'+c.toUpperCase()+'-'+(labelSuffix||'KPIS')+'</div>' : '';
     return heading + byCat[c].map(rowFn).join('');
   }).join('');
 }
@@ -802,154 +806,222 @@ function hasStorage(){
 }
 let storageAvailable = true;
 
-const ZIEL_FIXES = {"Warenbestandhöhe (Einkauf)": {"ziel": 1.3, "okNum": 1.6, "direction": "low"}, "Retourenquote (Drittmarken) (Einkauf)": {"ziel": 12, "okNum": 16, "direction": "low"}, "Lagerumschlag (Einkauf)": {"ziel": 6, "okNum": 4, "direction": "high"}, "Langsamdreher/Überbestände (C-Ware-Anteil, ABC) (Einkauf)": {"ziel": 8, "okNum": 15, "direction": "low"}, "Out of Stock Kernsortiment (Einkauf)": {"ziel": 3, "okNum": 5, "direction": "low"}, "Bestandscontrolling (Forecast-Treffer) (Einkauf)": {"ziel": 85, "okNum": 70, "direction": "high"}, "Lieferantenperformance (Termintreue) (Einkauf)": {"ziel": 95, "okNum": 90, "direction": "high"}, "Rohertrag 1 (Sales/Campaigns)": {"ziel": 42, "okNum": 36, "direction": "high"}, "Rohertrag 2 (Sales/Campaigns)": {"ziel": 25, "okNum": 20, "direction": "high"}, "Umsatz RidersChoice (Anteil am Gesamtumsatz) (Sales/Campaigns)": {"ziel": 37, "okNum": 33, "direction": "high"}, "Ø Warenkorb (Sales/Campaigns)": {"ziel": 93, "okNum": 87, "direction": "high"}, "Profit x / Bestellung (Sales/Campaigns)": {"ziel": 18, "okNum": 14, "direction": "high"}, "Rohertrag RidersChoice (Sales/Campaigns)": {"ziel": 42, "okNum": 38, "direction": "high"}, "Pricing Performance (Mindestmarge-Einhaltung) (Sales/Campaigns)": {"ziel": 98, "okNum": 95, "direction": "high"}, "Abgeschlossene Feature Requests / Woche [IT]": {"ziel": 10, "okNum": 8, "direction": "high"}, "Bug-Lösungszeit Median (letzte 14 Tage) [IT]": {"ziel": 48, "okNum": 72, "direction": "low"}, "Backlog-Größe [IT]": {"ziel": 30, "okNum": 50, "direction": "low"}, "Eingesparte Std./Monat durch Automatisierung [IT]": {"ziel": 10, "okNum": 5, "direction": "high"}, "Performance Score umsatzkrit. Seiten (inkl. Ladezeit) [IT]": {"ziel": 90, "okNum": 50, "direction": "high"}, "Systemverfügbarkeit Shop [IT]": {"ziel": 99.5, "okNum": 98, "direction": "high"}, "Reopen-Quote Tickets [IT]": {"ziel": 5, "okNum": 10, "direction": "low"}, "Offene kritische Updates/Security-Patches [IT]": {"ziel": 1, "okNum": 2, "direction": "low"}, "Ticketvolumen gesamt / Woche [Customer Service]": {"ziel": 280, "okNum": 350, "direction": "low"}, "Automatisierungsquote Anni (Anteil gelöster Tickets) [Customer Service]": {"ziel": 75, "okNum": 65, "direction": "high"}, "Beantwortungszeit Tickets (Ø bis 1. Antwort) [Customer Service]": {"ziel": 5, "okNum": 7, "direction": "low"}, "Reopened Rate (Anteil wieder geöffneter Tickets) [Customer Service]": {"ziel": 4, "okNum": 7, "direction": "low"}, "Versanddauer: Anteil in 0 Tagen versendet [Supply Chain/Logistik]": {"ziel": 100, "okNum": null, "direction": "high"}, "Versanddauer: Anteil in 0–1 Tagen versendet [Supply Chain/Logistik]": {"ziel": 98, "okNum": null, "direction": "high"}, "Buchungszeit Wareneingang (Anlieferung bis Einbuchung bei VCA) [Supply Chain/Logistik]": {"ziel": 24, "okNum": null, "direction": "low"}, "Retourenbearbeitung — offene Retouren [Supply Chain/Logistik]": {"ziel": 3, "okNum": null, "direction": "low"}, "Ø Bearbeitungsdauer Retouren [Supply Chain/Logistik]": {"ziel": 3, "okNum": null, "direction": "low"}, "Dauer Kundenbestellung bis Lieferantenbestellung [Supply Chain/Logistik]": {"ziel": 2, "okNum": 3, "direction": "low"}};
+/* Phase 2: Die Tabellen (people, rocks, kpis, ...) sind jetzt die alleinige Datenquelle.
+   Die frueheren migrate*()-Funktionen glichen den geteilten JSON-Blob gegen SEED_*-Konstanten
+   ab (Personen-Umbenennungen, fehlende Kennzahlen nachtragen etc.) — das entfaellt, weil es
+   keinen Blob-vs-Seed-Drift mehr gibt, den man ausgleichen muesste. SEED_ROCKS/SEED_KPIS/
+   SEED_ROLES bleiben unten nur als Notfall-Fallback bestehen, falls Supabase gar nicht
+   erreichbar ist (siehe hasStorage()). */
 
-/* Generelle Regel: "Prozess"/"Fortschritt" kategorisierte Kennzahlen sind Gold-Hebel (Aktivität in Zahlen),
-   nur "Ergebnis" ist ein echter KPI. Ausnahmen (echte Kennzahl ohne direkte Aktivität dahinter) explizit gelistet. */
-const TYPE_FIX_EXCEPTIONS = new Set(["Mitarbeiter-NPS (eNPS, aus Quartalsumfrage)"]);
-function migrateTypeFixes(loaded){
-  let touched = false;
-  loaded.kpis.forEach(function(k){
-    const cat = (k.category||'').toLowerCase();
-    const isProcessLike = cat.indexOf('prozess')!==-1 || cat.indexOf('fortschritt')!==-1;
-    if(isProcessLike && k.type==='kpi' && !TYPE_FIX_EXCEPTIONS.has(k.metric)){
-      k.type = 'goldhebel';
-      k.category = null;
-      touched = true;
-    }
-  });
-  if(touched) console.log('Migration: Prozess-/Fortschritt-Kennzahlen als Gold-Hebel neu klassifiziert.');
+const CURRENT_YEAR = new Date().getFullYear();
+function quarterCode(full){ return (full||'').split('-')[0]; }
+function fullQuarter(code, year){ return code + '-' + (year || CURRENT_YEAR); }
+
+let PERSON_ID_BY_NAME = {};
+let PERSON_NAME_BY_ID = {};
+function personId(name){ return PERSON_ID_BY_NAME[name] || null; }
+
+/* ---------- Phase 2: granularer Zugriff auf die echten Tabellen statt auf den Blob ---------- */
+function reportSaveResult(res){
+  if(res && res.error){ storageAvailable = false; console.error('Speichern fehlgeschlagen — lokaler Modus aktiv.', res.error); updateShareNote(); }
+  else { storageAvailable = true; }
+  return res;
 }
 
-/* Ergänzt fehlende Stammdaten (KPIs, Gold-Hebel, Rollen-Textfelder) bei Personen, die schon vor
-   einer inhaltlichen Korrektur im geteilten Speicher existierten. Löscht/überschreibt NICHTS,
-   was schon da ist — ergänzt nur, was komplett fehlt (Abgleich per Person+Metrik bzw. Gold-Hebel-ID). */
-function migrateNewPeople(loaded){
-  let touched = false;
-  SEED_ROLES.forEach(function(seedRole){
-    const exists = loaded.roles.some(function(r){ return r.person===seedRole.person; });
-    if(!exists){
-      loaded.roles.push(JSON.parse(JSON.stringify(seedRole)));
-      touched = true;
-    }
-  });
-  if(touched) console.log('Migration: neue Person(en) aus den Stammdaten angelegt.');
-}
-/* Cora war irrtümlich als eigenständige Person angelegt worden (aus einer nicht autorisierten
-   Quelle) — sie gehört inhaltlich zu Oz' OKR (KR5) und wird hier aktiv wieder entfernt. */
-const REMOVED_PEOPLE = ["Bianca","Patrick","Rasso","Cora"];
-function migrateRemovedPeople(loaded){
-  let touched = false;
-  const before = loaded.roles.length;
-  loaded.roles = loaded.roles.filter(function(r){ return REMOVED_PEOPLE.indexOf(r.person)===-1; });
-  loaded.rocks = loaded.rocks.filter(function(r){ return REMOVED_PEOPLE.indexOf(r.person)===-1; });
-  loaded.kpis = loaded.kpis.filter(function(k){ return REMOVED_PEOPLE.indexOf(k.person)===-1; });
-  if(loaded.roles.length !== before) touched = true;
-  if(touched) console.log('Migration: entfernte Personen bereinigt.');
-}
-function migrateSeedSync(loaded){
-  let touched = false;
-
-  // fehlende Rocks (per ID) ergänzen
-  SEED_ROCKS.forEach(function(seedR){
-    const exists = loaded.rocks.some(function(r){ return r.id===seedR.id; });
-    if(!exists){
-      loaded.rocks.push(JSON.parse(JSON.stringify(seedR)));
-      touched = true;
-    }
-  });
-  const ISSUE_STATUS_MAP = {'in Arbeit':'kommuniziert', 'gelöst':'erledigt'};
-  (loaded.issues||[]).forEach(function(i){
-    if(ISSUE_STATUS_MAP[i.status]){ i.status = ISSUE_STATUS_MAP[i.status]; touched = true; }
-  });
-
-  // fehlende KPIs (per Person + Messgröße) ergänzen
-  SEED_KPIS.forEach(function(seedK){
-    const exists = loaded.kpis.some(function(k){ return k.person===seedK.person && k.metric===seedK.metric; });
-    if(!exists){
-      loaded.kpis.push(JSON.parse(JSON.stringify(seedK)));
-      touched = true;
-    }
-  });
-
-  // fehlende Gold-Hebel (per ID) und fehlende Rollen-Textfelder ergänzen
-  SEED_ROLES.forEach(function(seedRole){
-    const stored = loaded.roles.find(function(r){ return r.person===seedRole.person; });
-    if(!stored) return; // neue Person wird von migrateKatharinaSplit o.ä. behandelt
-    if(!stored.goldhebel) stored.goldhebel = [];
-    (seedRole.goldhebel||[]).forEach(function(seedGh){
-      const exists = stored.goldhebel.some(function(g){ return g.id===seedGh.id; });
-      if(!exists){
-        stored.goldhebel.push(JSON.parse(JSON.stringify(seedGh)));
-        touched = true;
-      }
-    });
-    ['title','mission','domains','q3_focus','q3_stand','q3_diagnose'].forEach(function(field){
-      if((stored[field]===undefined || stored[field]===null) && seedRole[field]!==undefined){
-        stored[field] = JSON.parse(JSON.stringify(seedRole[field]));
-        touched = true;
-      }
-    });
-  });
-
-  if(touched) console.log('Migration: fehlende KPIs/Gold-Hebel/Rollenfelder aus den Stammdaten ergänzt.');
-}
-function migrateZielFixes(loaded){
-  let touched = false;
-  loaded.kpis.forEach(function(k){
-    const fix = ZIEL_FIXES[k.metric];
-    if(!fix) return;
-    if(k.ziel===null || k.ziel===undefined || k.okNum===undefined){
-      k.ziel = fix.ziel;
-      k.okNum = fix.okNum;
-      k.direction = fix.direction;
-      touched = true;
-    }
-  });
-  if(touched) console.log('Migration: Ziel-/Richtungswerte für Farblogik nachgetragen.');
-}
-function migrateKatharinaSplit(loaded){
-  const LEGACY_IT_METRICS = new Set([
-    "Anzahl abgeschlossener Feature Requests pro Woche",
-    "Durchschnittliche Lösungszeit Bugtickets (last 90d)",
-    "Backlog Größe",
-    "Lösungszeit Bugtickets (letzte 14d) - Median",
+async function fetchAllData(){
+  const [peopleR, rocksR, krR, krStatusR, kpisR, kpiValuesR, roleNotesR, opR] = await Promise.all([
+    sb.from('people').select('*'),
+    sb.from('rocks').select('*'),
+    sb.from('key_results').select('*'),
+    sb.from('key_result_status_history').select('*'),
+    sb.from('kpis').select('*'),
+    sb.from('kpi_values').select('*'),
+    sb.from('role_quarter_notes').select('*'),
+    sb.from('operational_items').select('*'),
   ]);
-  let touched = false;
+  [peopleR, rocksR, krR, krStatusR, kpisR, kpiValuesR, roleNotesR, opR].forEach(function(r){ if(r.error) throw r.error; });
 
-  loaded.kpis.forEach(function(k){
-    if(k.person !== 'Katharina') return;
-    touched = true;
-    if(k.metric.indexOf('[IT]') !== -1 || LEGACY_IT_METRICS.has(k.metric)){
-      k.person = 'Kathi Dorn';
-    } else {
-      k.person = 'Kathi Hamperl';
-    }
+  PERSON_ID_BY_NAME = {}; PERSON_NAME_BY_ID = {};
+  peopleR.data.forEach(function(p){ PERSON_ID_BY_NAME[p.name] = p.id; PERSON_NAME_BY_ID[p.id] = p.name; });
+
+  const roles = peopleR.data.map(function(p){
+    const notes = roleNotesR.data.filter(function(n){ return n.person_id===p.id; });
+    return {
+      person: p.name, title: p.title, mission: p.mission, domains: p.domains || [],
+      hasDoc: !!p.mission,
+      quarterNotes: notes.map(function(n){ return { quarter: n.quarter, focus: n.focus_text, stand: n.stand_text, diagnose: n.diagnose || [] }; })
+    };
   });
 
-  loaded.rocks.forEach(function(r){
-    if(r.person === 'Katharina'){ r.person = 'Kathi Dorn'; touched = true; }
+  const statusByKr = {};
+  krStatusR.data.forEach(function(s){
+    (statusByKr[s.key_result_id] = statusByKr[s.key_result_id] || {})[s.period_key] = denormStatus(s.status);
+  });
+  const krsByRock = {};
+  krR.data.slice().sort(function(a,b){ return (a.sort_order||0)-(b.sort_order||0); }).forEach(function(k){
+    (krsByRock[k.rock_id] = krsByRock[k.rock_id] || []).push({ id: k.id, text: k.text, weekly: statusByKr[k.id] || {} });
+  });
+  const rocks = rocksR.data.map(function(r){
+    return {
+      id: r.id, person: PERSON_NAME_BY_ID[r.person_id], quarter: r.quarter,
+      objective: r.objective, hypothese: r.hypothesis, status: r.status || 'active', closed: r.closed_result || null,
+      krs: krsByRock[r.id] || []
+    };
   });
 
-  if(loaded.roles.some(function(r){ return r.person==='Katharina'; })){
-    touched = true;
-    const oldRole = loaded.roles.find(function(r){ return r.person==='Katharina'; });
-    loaded.roles = loaded.roles.filter(function(r){ return r.person!=='Katharina'; });
-    if(!loaded.roles.some(function(r){ return r.person==='Kathi Dorn'; })){
-      loaded.roles.push(JSON.parse(JSON.stringify(SEED_ROLES.find(function(r){ return r.person==='Kathi Dorn'; }))));
-    }
-    if(!loaded.roles.some(function(r){ return r.person==='Kathi Hamperl'; })){
-      const kh = JSON.parse(JSON.stringify(SEED_ROLES.find(function(r){ return r.person==='Kathi Hamperl'; })));
-      // eigene, alte Gold-Hebel-Einträge (falls schon bearbeitet) mit übernehmen statt zu verwerfen
-      if(oldRole && oldRole.goldhebel && oldRole.goldhebel.length){
-        kh.goldhebel = oldRole.goldhebel;
-      }
-      loaded.roles.push(kh);
-    }
-  }
-  if(touched){
-    console.log('Migration: "Katharina" wurde in "Kathi Dorn" / "Kathi Hamperl" aufgeteilt — bestehende Werte bleiben erhalten.');
-  }
+  const valuesByKpi = {};
+  kpiValuesR.data.forEach(function(v){
+    const val = (v.value_numeric!==null && v.value_numeric!==undefined) ? Number(v.value_numeric) : v.value_text;
+    (valuesByKpi[v.kpi_id] = valuesByKpi[v.kpi_id] || {})[v.period_key] = val;
+  });
+  const kpis = kpisR.data.map(function(k){
+    return {
+      id: k.id, person: PERSON_NAME_BY_ID[k.person_id], owner: PERSON_NAME_BY_ID[k.owner_person_id] || PERSON_NAME_BY_ID[k.person_id],
+      metric: k.metric, detailText: k.detail_text, type: k.type, category: k.category, cadence: k.cadence || 'weekly',
+      direction: k.direction || 'high', gut: k.gut, ok: k.ok, off: k.off,
+      gutLabel: k.gut_label, okLabel: k.ok_label, offLabel: k.off_label,
+      ziel: (k.ziel!==null && k.ziel!==undefined) ? Number(k.ziel) : null,
+      okNum: (k.ok_num!==null && k.ok_num!==undefined) ? Number(k.ok_num) : null,
+      rhythm: k.rhythm_label, datenquelle: k.datenquelle, dataSourceType: k.data_source_type || 'manual',
+      quarter: k.quarter, status: k.status || 'active',
+      weekly: valuesByKpi[k.id] || {}
+    };
+  });
+
+  const opRows = opR.data;
+  const issues = opRows.filter(function(r){ return r.list_type==='issue'; }).map(function(r){
+    const ex = r.extra || {}; return { id:r.id, wer:r.wer, text:r.text_content, kategorie:r.category, prioritaet:ex.prioritaet, status:r.status, quarter:r.quarter, archived:!!r.archived };
+  });
+  const feedback = opRows.filter(function(r){ return r.list_type==='feedback'; }).map(function(r){
+    const ex = r.extra || {}; return { id:r.id, typ:ex.typ, text:r.text_content, kategorie:r.category, datum:ex.datum, quelle:ex.quelle };
+  });
+  const www = opRows.filter(function(r){ return r.list_type==='www'; }).map(function(r){
+    const ex = r.extra || {}; return { id:r.id, wer:r.wer, was:r.text_content, bisWann:ex.bis_wann, status:r.status };
+  });
+  const ideas = opRows.filter(function(r){ return r.list_type==='idea'; }).map(function(r){
+    return { id:r.id, wer:r.wer, text:r.text_content, kategorie:r.category, status:r.status };
+  });
+
+  return { roles: roles, rocks: rocks, kpis: kpis, issues: issues, feedback: feedback, www: www, ideas: ideas };
+}
+
+function personIdOrWarn(name){
+  const id = PERSON_ID_BY_NAME[name];
+  if(!id) console.error('Unbekannte Person fuer Persistenz:', name);
+  return id;
+}
+function persistRock(rock){
+  if(!hasStorage()) return Promise.resolve();
+  return sb.from('rocks').upsert({
+    id: rock.id, person_id: personIdOrWarn(rock.person), quarter: rock.quarter,
+    objective: rock.objective, hypothesis: rock.hypothese, status: rock.status || 'active',
+    closed_result: rock.closed || null, updated_at: new Date().toISOString()
+  }, { onConflict: 'id' }).then(reportSaveResult);
+}
+function persistKeyResult(kr, rockId, sortOrder){
+  if(!hasStorage()) return Promise.resolve();
+  return sb.from('key_results').upsert({
+    id: kr.id, rock_id: rockId, text: kr.text, sort_order: sortOrder || 0, updated_at: new Date().toISOString()
+  }, { onConflict: 'id' }).then(reportSaveResult);
+}
+function deleteKeyResultRow(id){
+  if(!hasStorage()) return Promise.resolve();
+  return sb.from('key_results').delete().eq('id', id).then(reportSaveResult);
+}
+function persistKrStatus(krId, periodKey, status){
+  if(!hasStorage()) return Promise.resolve();
+  if(!status) return sb.from('key_result_status_history').delete().eq('key_result_id', krId).eq('period_key', periodKey).then(reportSaveResult);
+  return sb.from('key_result_status_history').upsert({
+    key_result_id: krId, period_key: periodKey, status: status
+  }, { onConflict: 'key_result_id,period_key' }).then(reportSaveResult);
+}
+function persistKpi(k){
+  if(!hasStorage()) return Promise.resolve();
+  return sb.from('kpis').upsert({
+    id: k.id, person_id: personIdOrWarn(k.person), owner_person_id: personIdOrWarn(k.owner || k.person),
+    metric: k.metric, detail_text: k.detailText || null, type: k.type, category: k.category || null,
+    cadence: k.cadence || 'weekly', direction: k.direction || 'high',
+    gut: k.gut || null, ok: k.ok || null, off: k.off || null,
+    gut_label: k.gutLabel || null, ok_label: k.okLabel || null, off_label: k.offLabel || null,
+    ziel: (k.ziel!==undefined && k.ziel!==null && k.ziel!=='') ? k.ziel : null,
+    ok_num: (k.okNum!==undefined && k.okNum!==null && k.okNum!=='') ? k.okNum : null,
+    rhythm_label: k.rhythm || null, datenquelle: k.datenquelle || null, data_source_type: k.dataSourceType || 'manual',
+    quarter: k.quarter, status: k.status || 'active', updated_at: new Date().toISOString()
+  }, { onConflict: 'id' }).then(reportSaveResult);
+}
+function persistKpiValue(kpiId, periodKey, value, isNumeric){
+  if(!hasStorage()) return Promise.resolve();
+  if(value===''||value===null||value===undefined) return sb.from('kpi_values').delete().eq('kpi_id', kpiId).eq('period_key', periodKey).then(reportSaveResult);
+  const row = { kpi_id: kpiId, period_key: periodKey, source: 'manual' };
+  if(isNumeric===false){ row.value_text = value; row.value_numeric = null; } else { row.value_numeric = parseFloat(value); row.value_text = null; }
+  return sb.from('kpi_values').upsert(row, { onConflict: 'kpi_id,period_key' }).then(reportSaveResult);
+}
+function persistOperationalItem(row){
+  if(!hasStorage()) return Promise.resolve();
+  return sb.from('operational_items').upsert(row, { onConflict: 'id' }).then(reportSaveResult);
+}
+function deleteOperationalItemRow(id){
+  if(!hasStorage()) return Promise.resolve();
+  return sb.from('operational_items').delete().eq('id', id).then(reportSaveResult);
+}
+/* Bestmoegliche Neupersistierung eines wiederhergestellten Undo-Snapshots: schreibt alles,
+   was im Snapshot steht, zurueck (upsert). Deckt nicht den Sonderfall ab, dass ein NEUER
+   Eintrag nach dem Undo-Punkt durch das Undo wieder verschwinden sollte — der bliebe in der
+   DB bestehen und wuerde bei einem spaeteren Neuladen wieder auftauchen. Alle haeufigen Faelle
+   (Wert-/Status-Aenderung, Bearbeitung, Loeschen rueckgaengig machen) funktionieren korrekt. */
+async function repersistSnapshot(data){
+  if(!hasStorage()) return;
+  const jobs = [];
+  data.rocks.forEach(function(rock){
+    jobs.push(persistRock(rock));
+    rock.krs.forEach(function(kr, i){
+      jobs.push(persistKeyResult(kr, rock.id, i));
+      Object.keys(kr.weekly||{}).forEach(function(period){ jobs.push(persistKrStatus(kr.id, period, normStatus(kr.weekly[period]))); });
+    });
+  });
+  data.kpis.forEach(function(k){
+    jobs.push(persistKpi(k));
+    Object.keys(k.weekly||{}).forEach(function(period){
+      const v = k.weekly[period];
+      jobs.push(persistKpiValue(k.id, period, v, typeof v === 'number'));
+    });
+  });
+  ['issues','feedback','www','ideas'].forEach(function(listName){
+    (data[listName]||[]).forEach(function(item){ jobs.push(persistOperationalItem(operationalItemToRow(listName, item))); });
+  });
+  await Promise.all(jobs);
+}
+
+/* Live-Synchronisierung: Änderungen anderer kommen automatisch an, kein manuelles
+   "Aktualisieren" mehr nötig (bleibt trotzdem als Button verfügbar). Bei jeder Aenderung
+   an irgendeiner der Tabellen wird (leicht entprellt) einfach alles neu geladen — bei der
+   ueberschaubaren Datenmenge hier ist das robuster als jede einzelne Aenderungsform von Hand
+   ins lokale DATA-Objekt einzupatchen. */
+let realtimeSubscribed = false;
+let realtimeRefetchTimer = null;
+function scheduleRealtimeRefetch(){
+  clearTimeout(realtimeRefetchTimer);
+  realtimeRefetchTimer = setTimeout(async function(){
+    try{
+      DATA = await fetchAllData();
+      renderPersonChips();
+      renderPersonDetail(currentPerson);
+      renderRocksOverview();
+      renderKpiOverview();
+      renderOperativ();
+      lastRefreshAt = new Date();
+      updateRefreshTimestamp();
+      storageAvailable = true; updateShareNote();
+    }catch(e){ console.error('Automatisches Neuladen fehlgeschlagen', e); }
+  }, 400);
+}
+function subscribeToRealtimeChanges(){
+  if(!hasStorage() || realtimeSubscribed) return;
+  realtimeSubscribed = true;
+  const tables = ['people','rocks','key_results','key_result_status_history','kpis','kpi_values','role_quarter_notes','operational_items'];
+  const channel = sb.channel('phase2_changes');
+  tables.forEach(function(t){ channel.on('postgres_changes', { event: '*', schema: 'public', table: t }, scheduleRealtimeRefetch); });
+  channel.subscribe();
 }
 
 async function loadData(){
@@ -957,31 +1029,15 @@ async function loadData(){
   loadViewState();
   let loaded = null;
   if(hasStorage()){
-    try{
-      const { data, error } = await sb.from('dashboard_state').select('data').eq('id','main').single();
-      if(error) throw error;
-      if(data && data.data && Object.keys(data.data).length) loaded = data.data;
-    }catch(e){ console.error('Laden aus Supabase fehlgeschlagen', e); loaded = null; }
+    try{ loaded = await fetchAllData(); }
+    catch(e){ console.error('Laden aus Supabase fehlgeschlagen', e); loaded = null; }
   } else {
     storageAvailable = false;
   }
   if(!loaded){
     loaded = { rocks: JSON.parse(JSON.stringify(SEED_ROCKS)), kpis: JSON.parse(JSON.stringify(SEED_KPIS)), roles: JSON.parse(JSON.stringify(SEED_ROLES)), issues: [], feedback: [], www: [], ideas: [] };
   }
-  if(!loaded.issues) loaded.issues = [];
-  if(!loaded.feedback) loaded.feedback = [];
-  if(!loaded.www) loaded.www = [];
-  if(!loaded.ideas) loaded.ideas = [];
-  migrateNewPeople(loaded);
-  migrateRemovedPeople(loaded);
-  migrateSeedSync(loaded);
-  migrateKatharinaSplit(loaded);
-  migrateZielFixes(loaded);
-  migrateTypeFixes(loaded);
   DATA = loaded;
-  if(storageAvailable){
-    try{ await saveData(); }catch(e){ storageAvailable = false; console.error('Erstes Speichern fehlgeschlagen — lokaler Modus aktiv.', e); }
-  }
   updateShareNote();
   renderPersonChips();
   renderPersonDetail(currentPerson);
@@ -992,39 +1048,6 @@ async function loadData(){
   checkForRecoverableBackup();
   subscribeToRealtimeChanges();
 }
-function saveData(){
-  if(!hasStorage()){ storageAvailable = false; return Promise.resolve(); }
-  return sb.from('dashboard_state').update({ data: DATA, updated_at: new Date().toISOString() }).eq('id','main').then(function(res){
-    if(res.error){ storageAvailable = false; console.error('Speichern fehlgeschlagen — lokaler Modus aktiv.', res.error); updateShareNote(); }
-    else { storageAvailable = true; }
-  }).catch(function(e){
-    storageAvailable = false; console.error('Speichern fehlgeschlagen — lokaler Modus aktiv.', e); updateShareNote();
-  });
-}
-
-/* Live-Synchronisierung: Änderungen anderer kommen automatisch an, kein manuelles
-   "Aktualisieren" mehr nötig (bleibt trotzdem als Button verfügbar). */
-let realtimeSubscribed = false;
-function subscribeToRealtimeChanges(){
-  if(!hasStorage() || realtimeSubscribed) return;
-  realtimeSubscribed = true;
-  sb.channel('dashboard_state_changes')
-    .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'dashboard_state', filter: 'id=eq.main' }, function(payload){
-      if(payload.new && payload.new.data){
-        DATA = payload.new.data;
-        migrateNewPeople(DATA); migrateRemovedPeople(DATA); migrateSeedSync(DATA);
-        migrateKatharinaSplit(DATA); migrateZielFixes(DATA); migrateTypeFixes(DATA);
-        renderPersonChips();
-        renderPersonDetail(currentPerson);
-        renderRocksOverview();
-        renderKpiOverview();
-        renderOperativ();
-        lastRefreshAt = new Date();
-        updateRefreshTimestamp();
-      }
-    })
-    .subscribe();
-}
 function updateShareNote(){
   const el = document.querySelector('.share-note');
   if(!el) return;
@@ -1034,13 +1057,12 @@ function updateShareNote(){
     el.innerHTML = '⚠ <b>Keine Datenbank-Verbindung:</b> Deine Eingaben werden gerade nicht dauerhaft gespeichert. Bitte Seite neu laden — falls das Problem bleibt, kurz Bescheid geben.';
   }
 }
-function saveAndRerender(){
-  // Rendering zuerst — ein Speicherfehler darf die sichtbare Änderung nie blockieren.
+function rerenderAll(){
+  // Rendering zuerst — die eigentliche Persistenz passiert an der jeweiligen Mutationsstelle.
   renderPersonDetail(currentPerson);
   renderRocksOverview();
   renderKpiOverview();
   renderOperativ();
-  saveData();
   saveLocalBackup();
 }
 
@@ -1088,14 +1110,14 @@ async function restoreFromBackup(){
       pushUndo();
       DATA = backup.data;
       if(!DATA.issues) DATA.issues=[]; if(!DATA.feedback) DATA.feedback=[]; if(!DATA.www) DATA.www=[]; if(!DATA.ideas) DATA.ideas=[];
-      saveAndRerender();
+      rerenderAll();
       document.querySelectorAll('.backup-banner').forEach(function(b){ b.remove(); });
     });
   }catch(e){ alertInline('Sicherung konnte nicht geladen werden.'); }
 }
 
 /* ---------- Operativ: Issues / Feedback / WWW ---------- */
-function uid(){ return Date.now()+'-'+Math.floor(Math.random()*10000); }
+function uid(){ return crypto.randomUUID(); }
 
 /* ---------- Generisches Modal-System (statt prompt()/confirm(), die in eingebetteten Ansichten blockiert werden können) ---------- */
 function openModal(title, subtitle, fields, submitLabel, onSubmit){
@@ -1218,6 +1240,23 @@ function renderOperativ(){
   }
 }
 
+/* Wandelt ein In-Memory-Operativ-Element (issue/feedback/www/idea) in die passende
+   operational_items-Zeile um (typspezifische Felder wandern ins extra-jsonb). */
+function operationalItemToRow(listName, item){
+  const singular = { issues:'issue', feedback:'feedback', www:'www', ideas:'idea' }[listName];
+  const base = { id: item.id, list_type: singular, updated_at: new Date().toISOString() };
+  if(singular==='issue'){
+    return Object.assign(base, { wer: item.wer, text_content: item.text, category: item.kategorie||null, status: item.status||'offen', quarter: item.quarter||null, archived: !!item.archived, extra: { prioritaet: item.prioritaet||null } });
+  }
+  if(singular==='feedback'){
+    return Object.assign(base, { wer: null, text_content: item.text, category: item.kategorie||null, status: 'offen', quarter: null, archived: false, extra: { typ: item.typ, quelle: item.quelle||null, datum: item.datum||null } });
+  }
+  if(singular==='www'){
+    return Object.assign(base, { wer: item.wer, text_content: item.was, category: null, status: item.status||'offen', quarter: null, archived: false, extra: { bis_wann: item.bisWann||null } });
+  }
+  return Object.assign(base, { wer: item.wer, text_content: item.text, category: item.kategorie||null, status: item.status||'offen', quarter: null, archived: false, extra: {} });
+}
+
 function statusSelect(kind, id, current){
   const opts = kind==='issue' ? ['offen','kommuniziert','erledigt'] : (kind==='idea' ? ['offen','in Prüfung','umgesetzt','verworfen'] : ['offen','in Arbeit','gelöst']);
   return '<select onchange="setOpStatus(\''+kind+'\',\''+id+'\',this.value)" style="font-family:\'Palanquin\',sans-serif; font-size:11.5px; padding:3px 6px; border:1px solid var(--gold30);">'+
@@ -1226,9 +1265,9 @@ function statusSelect(kind, id, current){
 }
 function setOpStatus(kind, id, value){
   pushUndo();
-  const arr = kind==='issue' ? DATA.issues : (kind==='idea' ? DATA.ideas : DATA.www);
-  const item = arr.find(function(x){ return x.id===id; });
-  if(item){ item.status = value; saveAndRerender(); }
+  const listName = kind==='issue' ? 'issues' : (kind==='idea' ? 'ideas' : 'www');
+  const item = DATA[listName].find(function(x){ return x.id===id; });
+  if(item){ item.status = value; rerenderAll(); persistOperationalItem(operationalItemToRow(listName, item)); }
 }
 
 function addIssue(){
@@ -1240,14 +1279,17 @@ function addIssue(){
     {key:'quarter', label:'Quartal', type:'select', options:['Q1','Q2','Q3'], value:'Q3'},
   ], 'Issue speichern', function(v){
     pushUndo();
-    DATA.issues.push({ id: uid(), wer: v.wer, text: v.text, kategorie: v.kategorie, prioritaet: v.prioritaet, status: 'offen', quarter: v.quarter, archived: false });
-    saveAndRerender();
+    const item = { id: uid(), wer: v.wer, text: v.text, kategorie: v.kategorie, prioritaet: v.prioritaet, status: 'offen', quarter: v.quarter, archived: false };
+    DATA.issues.push(item);
+    rerenderAll();
+    persistOperationalItem(operationalItemToRow('issues', item));
   });
 }
 function deleteIssue(id){
   pushUndo();
   DATA.issues = DATA.issues.filter(function(i){ return i.id!==id; });
-  saveAndRerender();
+  rerenderAll();
+  deleteOperationalItemRow(id);
 }
 function editIssue(id){
   const item = DATA.issues.find(function(i){ return i.id===id; });
@@ -1262,13 +1304,14 @@ function editIssue(id){
   ], 'Speichern', function(v){
     pushUndo();
     item.wer = v.wer; item.text = v.text; item.kategorie = v.kategorie; item.prioritaet = v.prioritaet; item.status = v.status; item.quarter = v.quarter;
-    saveAndRerender();
+    rerenderAll();
+    persistOperationalItem(operationalItemToRow('issues', item));
   });
 }
 function toggleArchiveIssue(id){
   pushUndo();
   const item = DATA.issues.find(function(i){ return i.id===id; });
-  if(item){ item.archived = !item.archived; saveAndRerender(); }
+  if(item){ item.archived = !item.archived; rerenderAll(); persistOperationalItem(operationalItemToRow('issues', item)); }
 }
 
 function addFeedback(){
@@ -1280,14 +1323,17 @@ function addFeedback(){
   ], 'Feedback speichern', function(v){
     pushUndo();
     const datum = new Date().toISOString().slice(0,10);
-    DATA.feedback.push({ id: uid(), typ: v.typ, text: v.text, kategorie: v.kategorie, datum: datum, quelle: v.quelle });
-    saveAndRerender();
+    const item = { id: uid(), typ: v.typ, text: v.text, kategorie: v.kategorie, datum: datum, quelle: v.quelle };
+    DATA.feedback.push(item);
+    rerenderAll();
+    persistOperationalItem(operationalItemToRow('feedback', item));
   });
 }
 function deleteFeedback(id){
   pushUndo();
   DATA.feedback = DATA.feedback.filter(function(f){ return f.id!==id; });
-  saveAndRerender();
+  rerenderAll();
+  deleteOperationalItemRow(id);
 }
 function editFeedback(id){
   const item = DATA.feedback.find(function(f){ return f.id===id; });
@@ -1300,7 +1346,8 @@ function editFeedback(id){
   ], 'Speichern', function(v){
     pushUndo();
     item.typ = v.typ; item.text = v.text; item.kategorie = v.kategorie; item.quelle = v.quelle;
-    saveAndRerender();
+    rerenderAll();
+    persistOperationalItem(operationalItemToRow('feedback', item));
   });
 }
 
@@ -1311,14 +1358,17 @@ function addWWW(){
     {key:'bisWann', label:'Bis wann?', placeholder:'optional, z. B. Freitag'},
   ], 'WWW-Punkt speichern', function(v){
     pushUndo();
-    DATA.www.push({ id: uid(), wer: v.wer, was: v.was, bisWann: v.bisWann, status: 'offen' });
-    saveAndRerender();
+    const item = { id: uid(), wer: v.wer, was: v.was, bisWann: v.bisWann, status: 'offen' };
+    DATA.www.push(item);
+    rerenderAll();
+    persistOperationalItem(operationalItemToRow('www', item));
   });
 }
 function deleteWWW(id){
   pushUndo();
   DATA.www = DATA.www.filter(function(w){ return w.id!==id; });
-  saveAndRerender();
+  rerenderAll();
+  deleteOperationalItemRow(id);
 }
 function editWWW(id){
   const item = DATA.www.find(function(w){ return w.id===id; });
@@ -1331,7 +1381,8 @@ function editWWW(id){
   ], 'Speichern', function(v){
     pushUndo();
     item.wer = v.wer; item.was = v.was; item.bisWann = v.bisWann; item.status = v.status;
-    saveAndRerender();
+    rerenderAll();
+    persistOperationalItem(operationalItemToRow('www', item));
   });
 }
 
@@ -1342,8 +1393,10 @@ function addIdea(){
     {key:'kategorie', label:'Kategorie', placeholder:'optional'},
   ], 'Idee speichern', function(v){
     pushUndo();
-    DATA.ideas.push({ id: uid(), wer: v.wer, text: v.text, kategorie: v.kategorie, status: 'offen' });
-    saveAndRerender();
+    const item = { id: uid(), wer: v.wer, text: v.text, kategorie: v.kategorie, status: 'offen' };
+    DATA.ideas.push(item);
+    rerenderAll();
+    persistOperationalItem(operationalItemToRow('ideas', item));
   });
 }
 function editIdea(id){
@@ -1357,13 +1410,15 @@ function editIdea(id){
   ], 'Speichern', function(v){
     pushUndo();
     item.wer = v.wer; item.text = v.text; item.kategorie = v.kategorie; item.status = v.status;
-    saveAndRerender();
+    rerenderAll();
+    persistOperationalItem(operationalItemToRow('ideas', item));
   });
 }
 function deleteIdea(id){
   pushUndo();
   DATA.ideas = DATA.ideas.filter(function(i){ return i.id!==id; });
-  saveAndRerender();
+  rerenderAll();
+  deleteOperationalItemRow(id);
 }
 
 function sparkline(periods, weeklyObj, ziel, w, h, direction, okNum){
@@ -1424,6 +1479,7 @@ function renderRockCard(rock){
     (rock.closed.pct!==null && rock.closed.pct!==undefined ? ' · '+rock.closed.pct+'% erreicht' : '')+
     (rock.closed.learning ? '<br>Learning: '+rock.closed.learning : '')+'</div>'
   ) : '';
+  const archivedBadge = rock.status==='archived' ? ' <span class="badge badge-light">archiviert</span>' : '';
   const krHtml = rock.krs.map(function(kr){
     const dots = weeks.map(function(n){
       const raw = kr.weekly[wk(n)];
@@ -1434,13 +1490,13 @@ function renderRockCard(rock){
   }).join('');
   return (
     '<div class="rock-card-static">'+
-      '<div class="rock-card-title">'+rock.objective+'</div>'+
+      '<div class="rock-card-title">'+rock.objective+archivedBadge+'</div>'+
       '<p style="font-size:12px; color:#555; margin:6px 0 10px;">'+rock.hypothese+'</p>'+
       closedInfo+
       '<div class="breadcrumb" style="margin-top:10px;">Key Results — Wochenstatus '+rock.quarter+' (Feld anklicken zum Ändern)</div>'+
       krHtml+
       '<button class="add-btn" style="margin-top:10px; margin-right:8px; background:var(--gold-hover); color:#fff;" onclick="editRock(\''+rock.id+'\')">✎ Rock bearbeiten</button>'+
-      '<button class="del-btn" style="margin-top:10px; border:1px solid var(--red30);" onclick="deleteRock(\''+rock.id+'\')">✕ Rock löschen</button>'+
+      '<button class="del-btn" title="'+(rock.status==='archived'?'aus Archiv holen':'archivieren')+'" style="margin-top:10px; border:1px solid var(--gold30); color:var(--gold-hover);" onclick="toggleArchiveRock(\''+rock.id+'\')">'+(rock.status==='archived'?'📤 wiederherstellen':'📦 archivieren')+'</button>'+
     '</div>'
   );
 }
@@ -1453,14 +1509,16 @@ function cycleKrStatus(rockId, krId, week){
   const nxt = nextStatus(cur);
   const denorm = denormStatus(nxt);
   if(denorm===null) delete kr.weekly[week]; else kr.weekly[week] = denorm;
-  saveAndRerender();
+  rerenderAll();
+  persistKrStatus(krId, week, nxt==='none' ? null : nxt);
 }
-function deleteRock(rockId){
-  openConfirmModal('Diesen Rock wirklich löschen?', 'Rock löschen', function(){
-    pushUndo();
-    DATA.rocks = DATA.rocks.filter(function(r){ return r.id!==rockId; });
-    saveAndRerender();
-  });
+function toggleArchiveRock(rockId){
+  pushUndo();
+  const rock = DATA.rocks.find(function(r){ return r.id===rockId; });
+  if(!rock) return;
+  rock.status = rock.status==='archived' ? 'active' : 'archived';
+  rerenderAll();
+  persistRock(rock);
 }
 
 function editRock(rockId){
@@ -1476,11 +1534,16 @@ function editRock(rockId){
     rock.objective = v.objective;
     rock.hypothese = v.hypothese;
     const lines = v.krs.split('\n').map(function(s){ return s.trim(); }).filter(function(s){ return s.length>0; });
+    const oldKrs = rock.krs;
     rock.krs = lines.map(function(text, i){
-      if(rock.krs[i]) return { id: rock.krs[i].id, text: text, weekly: rock.krs[i].weekly };
-      return { id: rock.id+'_KR'+(i+1)+'_'+Date.now(), text: text, weekly: {} };
+      if(oldKrs[i]) return { id: oldKrs[i].id, text: text, weekly: oldKrs[i].weekly };
+      return { id: uid(), text: text, weekly: {} };
     });
-    saveAndRerender();
+    rerenderAll();
+    persistRock(rock);
+    rock.krs.forEach(function(kr, i){ persistKeyResult(kr, rock.id, i); });
+    // Key Results, die durch weniger Zeilen im Textarea weggefallen sind, auch in der DB entfernen
+    oldKrs.slice(rock.krs.length).forEach(function(removedKr){ deleteKeyResultRow(removedKr.id); });
   });
 }
 
@@ -1490,48 +1553,53 @@ function renderKpiRow(k, quarter){
   const spark = sparkline(periods, k.weekly, k.ziel, null, null, k.direction, k.okNum);
   const latest = latestValue(periods, k.weekly);
   const arrow = trendArrow(periods, k.weekly);
-  const rowId = 'kpi-'+k.person+'-'+k.metric.replace(/[^a-zA-Z0-9]/g,'').slice(0,20)+'-'+quarter;
+  const rowId = 'kpi-'+k.id;
   const cadenceLabel = {weekly:'wöchentlich erfassen',monthly:'monatlich erfassen',quarterly:'einmal pro Quartal erfassen'}[cadence];
   const isNumeric = (k.ziel!==null && k.ziel!==undefined) || (typeof k.okNum === 'number');
   const inputType = isNumeric ? 'number' : 'text';
   const inputs = periods.map(function(p){
     const v = k.weekly[p];
     const vv = (v!==undefined && v!==null) ? v : '';
-    return '<div class="kpi-input-cell"><label>'+periodLabel(p)+'</label><input type="'+inputType+'" '+(isNumeric?'step="any"':'')+' value="'+vv+'" onchange="setKpiValue(\''+k.person+'\',\''+k.metric.replace(/'/g,"\\'")+'\',\''+p+'\',this.value,'+isNumeric+')"></div>';
+    return '<div class="kpi-input-cell"><label>'+periodLabel(p)+'</label><input type="'+inputType+'" '+(isNumeric?'step="any"':'')+' value="'+vv+'" onchange="setKpiValue(\''+k.id+'\',\''+p+'\',this.value,'+isNumeric+')"></div>';
   }).join('');
+  const archivedBadge = k.status==='archived' ? ' <span class="badge badge-light">archiviert</span>' : '';
+  const ownerLine = (k.owner && k.owner!==k.person) ? ' <span style="color:var(--darkgrey);">· Owner: '+k.owner+'</span>' : '';
   let subline;
   if(k.gut || k.ok || k.off){
     const gL = k.gutLabel||'GUT', oL = k.okLabel||'OK', fL = k.offLabel||'OFF';
-    subline = k.person+'<br><span class="badge badge-green" style="margin-right:3px;">'+gL+' '+(k.gut||'–')+'</span><span class="badge badge-amber" style="margin-right:3px;">'+oL+' '+(k.ok||'–')+'</span><span class="badge badge-red">'+fL+' '+(k.off||'–')+'</span>'+(k.rhythm?' <span style="color:var(--darkgrey);">· '+k.rhythm+'</span>':'')+(k.datenquelle?' <span style="color:var(--darkgrey);">· Quelle: '+k.datenquelle+'</span>':'');
+    subline = k.person+'<br><span class="badge badge-green" style="margin-right:3px;">'+gL+' '+(k.gut||'–')+'</span><span class="badge badge-amber" style="margin-right:3px;">'+oL+' '+(k.ok||'–')+'</span><span class="badge badge-red">'+fL+' '+(k.off||'–')+'</span>'+(k.rhythm?' <span style="color:var(--darkgrey);">· '+k.rhythm+'</span>':'')+(k.datenquelle?' <span style="color:var(--darkgrey);">· Quelle: '+k.datenquelle+'</span>':'')+ownerLine;
   } else {
-    subline = k.person+' · Ziel: '+(k.ziel!==null&&k.ziel!==undefined?k.ziel:'–')+' <span style="color:var(--darkgrey);">· '+cadenceLabel+'</span>';
+    subline = k.person+' · Ziel: '+(k.ziel!==null&&k.ziel!==undefined?k.ziel:'–')+' <span style="color:var(--darkgrey);">· '+cadenceLabel+'</span>'+ownerLine;
   }
+  const detailLine = k.detailText ? '<div class="gh-card-detail">→ '+k.detailText+'</div>' : '';
   return (
     '<div class="kpi-row">'+
-      '<div class="kpi-meta"><div class="kpi-name">'+k.metric+'</div><div class="kpi-sub2">'+subline+'</div></div>'+
+      '<div class="kpi-meta"><div class="kpi-name">'+k.metric+archivedBadge+'</div><div class="kpi-sub2">'+subline+'</div>'+detailLine+'</div>'+
       '<div class="kpi-spark">'+spark+'</div>'+
       '<div class="kpi-latest">'+(latest?latest.value:'–')+' '+arrow+'</div>'+
       '<button class="kpi-expand-btn" onclick="togglePanel(\''+rowId+'\', document.getElementById(\''+rowId+'\'))">'+cadenceLabel+'</button>'+
-      '<button class="del-btn" title="bearbeiten" style="color:var(--gold-hover);" onclick="editKpi(\''+k.person+'\',\''+k.metric.replace(/'/g,"\\'")+'\')">✎</button>'+
-      '<button class="del-btn" title="KPI löschen" onclick="deleteKpi(\''+k.person+'\',\''+k.metric.replace(/'/g,"\\'")+'\')">✕</button>'+
+      '<button class="del-btn" title="bearbeiten" style="color:var(--gold-hover);" onclick="editKpi(\''+k.id+'\')">✎</button>'+
+      '<button class="del-btn" title="'+(k.status==='archived'?'aus Archiv holen':'archivieren')+'" onclick="toggleArchiveKpi(\''+k.id+'\')">'+(k.status==='archived'?'📤':'📦')+'</button>'+
       '<div class="kpi-edit-panel'+(isOpen(rowId)?' open':'')+'" id="'+rowId+'"><div class="kpi-input-grid">'+inputs+'</div></div>'+
     '</div>'
   );
 }
 
-function setKpiValue(person, metric, week, value, isNumeric){
+function setKpiValue(kpiId, week, value, isNumeric){
   pushUndo();
-  const k = DATA.kpis.find(function(k){ return k.person===person && k.metric===metric; });
+  const k = DATA.kpis.find(function(k){ return k.id===kpiId; });
   if(!k) return;
   if(value===''){ delete k.weekly[week]; } else { k.weekly[week] = (isNumeric===false) ? value : parseFloat(value); }
-  saveAndRerender();
+  rerenderAll();
+  persistKpiValue(kpiId, week, value, isNumeric);
 }
-function deleteKpi(person, metric){
-  openConfirmModal('Diese KPI („'+metric+'") wirklich löschen?', 'KPI löschen', function(){
-    pushUndo();
-    DATA.kpis = DATA.kpis.filter(function(k){ return !(k.person===person && k.metric===metric); });
-    saveAndRerender();
-  });
+function toggleArchiveKpi(kpiId){
+  pushUndo();
+  const k = DATA.kpis.find(function(k){ return k.id===kpiId; });
+  if(!k) return;
+  k.status = k.status==='archived' ? 'active' : 'archived';
+  rerenderAll();
+  persistKpi(k);
 }
 
 function cadenceToDe(c){ return {weekly:'wöchentlich', monthly:'monatlich', quarterly:'quartalsweise'}[c||'weekly']; }
@@ -1543,48 +1611,23 @@ function goldhebelCadence(g){
   if(r.indexOf('monatlich')!==-1) return 'monthly';
   return 'quarterly';
 }
-function renderGoldhebelWeeklyPanel(person, g, quarter){
-  if(!g.weekly) g.weekly = {};
-  const cadence = goldhebelCadence(g);
-  const periods = periodsForQuarter(quarter, cadence);
-  const spark = sparkline(periods, g.weekly, null, 110, 26);
-  const latest = latestValue(periods, g.weekly);
-  const arrow = trendArrow(periods, g.weekly);
-  const rowId = 'gh-'+person.replace(/[^a-zA-Z0-9]/g,'')+'-'+g.id.replace(/[^a-zA-Z0-9]/g,'');
-  const cadenceLabel = {weekly:'wöchentlich erfassen',monthly:'monatlich erfassen',quarterly:'einmal pro Quartal erfassen'}[cadence];
-  const inputs = periods.map(function(p){
-    const v = g.weekly[p];
-    const vv = (typeof v === 'number') ? v : '';
-    return '<div class="kpi-input-cell"><label>'+periodLabel(p)+'</label><input type="number" step="any" value="'+vv+'" onchange="setGoldhebelValue(\''+person+'\',\''+g.id+'\',\''+p+'\',this.value)"></div>';
-  }).join('');
-  return '<div style="display:flex; align-items:center; gap:10px; margin-top:6px;">'+
-      '<div class="kpi-spark">'+spark+'</div>'+
-      '<div style="font-family:\'Vidaloka\',serif; font-size:14px; min-width:40px;">'+(latest?latest.value:'–')+' '+arrow+'</div>'+
-      '<button class="kpi-expand-btn" onclick="togglePanel(\''+rowId+'\', document.getElementById(\''+rowId+'\'))">'+cadenceLabel+'</button>'+
-    '</div>'+
-    '<div class="kpi-edit-panel'+(isOpen(rowId)?' open':'')+'" id="'+rowId+'"><div class="kpi-input-grid">'+inputs+'</div></div>';
-}
-function setGoldhebelValue(person, id, period, value){
-  pushUndo();
-  const role = DATA.roles.find(function(r){ return r.person===person; });
-  if(!role) return;
-  const g = (role.goldhebel||[]).find(function(x){ return x.id===id; });
-  if(!g) return;
-  if(!g.weekly) g.weekly = {};
-  if(value===''){ delete g.weekly[period]; } else { g.weekly[period] = parseFloat(value); }
-  saveAndRerender();
-}
 function cadenceFromDe(v){ return v==='monatlich' ? 'monthly' : (v==='quartalsweise' ? 'quarterly' : 'weekly'); }
 
-function editKpi(person, metric){
-  const k = DATA.kpis.find(function(x){ return x.person===person && x.metric===metric; });
+function ownerSelectField(label, key, current, defaultPerson){
+  return {key:key, label:label, type:'select', options:ALL_PEOPLE, value: current||defaultPerson};
+}
+
+function editKpi(kpiId){
+  const k = DATA.kpis.find(function(x){ return x.id===kpiId; });
   if(!k) return;
   const isCorridor = !!(k.gut || k.ok || k.off);
   openModal('Bearbeiten: '+k.metric, 'Rhythmus, Zielwerte oder Typ ändern. Bereits eingetragene Wochenwerte bleiben erhalten — beim Wechsel des Rhythmus ordnen sie sich neu ein.', [
     {key:'metric', label:'Name der Messgröße', value:k.metric, required:true},
     {key:'type', label:'Typ', type:'select', options:['KPI','Gold-Hebel (mit Wochentracking)'], value:(k.type==='goldhebel'?'Gold-Hebel (mit Wochentracking)':'KPI')},
+    ownerSelectField('Zuständig/Owner', 'owner', k.owner, k.person),
     {key:'cadence', label:'Rhythmus', type:'select', options:['wöchentlich','monatlich','quartalsweise'], value:cadenceToDe(k.cadence)},
     {key:'category', label:'Kategorie (optional, z. B. "Ergebnis")', value:k.category||''},
+    {key:'detailText', label:'Detail/Beschreibung (optional)', type:'textarea', rows:2, value:k.detailText||''},
     {key:'gut', label:'GUT (Zielkorridor, optional)', value:k.gut||''},
     {key:'ok', label:'OK (Zielkorridor, optional)', value:k.ok||''},
     {key:'off', label:'OFF (Zielkorridor, optional)', value:k.off||''},
@@ -1596,8 +1639,10 @@ function editKpi(person, metric){
     pushUndo();
     k.metric = v.metric;
     k.type = v.type==='KPI' ? 'kpi' : 'goldhebel';
+    k.owner = v.owner;
     k.cadence = cadenceFromDe(v.cadence);
     k.category = v.category || null;
+    k.detailText = v.detailText || null;
     k.gut = v.gut || null;
     k.ok = v.ok || null;
     k.off = v.off || null;
@@ -1605,7 +1650,8 @@ function editKpi(person, metric){
     k.direction = v.direction==='niedriger = besser' ? 'low' : 'high';
     k.rhythm = v.rhythm || null;
     k.datenquelle = v.datenquelle || null;
-    saveAndRerender();
+    rerenderAll();
+    persistKpi(k);
   });
 }
 
@@ -1617,9 +1663,12 @@ function addRock(person, quarter){
   ], 'Rock speichern', function(v){
     pushUndo();
     const krLines = v.krs.split('\n').map(function(s){ return s.trim(); }).filter(function(s){ return s.length>0; });
-    const krs = krLines.map(function(text, i){ return {id: person+'_'+quarter+'_KR'+(i+1)+'_'+Date.now(), text: text, weekly: {} }; });
-    DATA.rocks.push({ id: person+'_'+quarter+'_'+Date.now(), person: person, quarter: quarter, objective: v.objective, hypothese: v.hypothese, krs: krs });
-    saveAndRerender();
+    const krs = krLines.map(function(text){ return {id: uid(), text: text, weekly: {} }; });
+    const rock = { id: uid(), person: person, quarter: fullQuarter(quarter), objective: v.objective, hypothese: v.hypothese, status: 'active', closed: null, krs: krs };
+    DATA.rocks.push(rock);
+    rerenderAll();
+    persistRock(rock);
+    krs.forEach(function(kr, i){ persistKeyResult(kr, rock.id, i); });
   });
 }
 
@@ -1627,15 +1676,24 @@ function addKpi(person){
   openModal('Neue KPI oder Gold-Hebel für '+person, 'Gold-Hebel = Aktivität, die zum Erfolg führt. KPI = Ergebnis-/Prozesszahl.', [
     {key:'type', label:'Typ', type:'select', options:['KPI','Gold-Hebel (mit Wochentracking)'], value:'KPI'},
     {key:'metric', label:'Name der Messgröße', required:true},
+    ownerSelectField('Zuständig/Owner', 'owner', null, person),
+    {key:'category', label:'Kategorie (optional)', placeholder:'optional'},
     {key:'ziel', label:'Ziel (Zahl, optional)', type:'number'},
     {key:'cadence', label:'Rhythmus', type:'select', options:['wöchentlich','monatlich','quartalsweise'], value:'wöchentlich'},
   ], 'Speichern', function(v){
     pushUndo();
     const ziel = v.ziel ? parseFloat(v.ziel) : null;
-    const cadence = v.cadence==='monatlich' ? 'monthly' : (v.cadence==='quartalsweise' ? 'quarterly' : 'weekly');
+    const cadence = cadenceFromDe(v.cadence);
     const type = v.type==='KPI' ? 'kpi' : 'goldhebel';
-    DATA.kpis.push({ person: person, metric: v.metric, ziel: ziel, cadence: cadence, quarters: ['Q3'], type: type, weekly: {} });
-    saveAndRerender();
+    const k = {
+      id: uid(), person: person, owner: v.owner, metric: v.metric, detailText: null, ziel: ziel, cadence: cadence,
+      category: v.category||null, type: type, direction: 'high', gut:null, ok:null, off:null,
+      gutLabel:null, okLabel:null, offLabel:null, okNum:null, rhythm:null, datenquelle:null, dataSourceType:'manual',
+      quarter: fullQuarter(personQuarterSel), status: 'active', weekly: {}
+    };
+    DATA.kpis.push(k);
+    rerenderAll();
+    persistKpi(k);
   });
 }
 
@@ -1643,111 +1701,73 @@ function addGoldhebel(person){
   openModal('Neuer Gold-Hebel für '+person, 'Eine Aktivität, die zum Erfolg führt.', [
     {key:'category', label:'Kategorie (optional, z. B. "Recruiting")', placeholder:'optional'},
     {key:'title', label:'Aktivität', required:true},
+    ownerSelectField('Zuständig/Owner', 'owner', null, person),
     {key:'detail', label:'Detail/Beschreibung', type:'textarea', rows:2, placeholder:'optional'},
     {key:'rhythm', label:'Rhythmus', type:'select', options:['wöchentlich','täglich','monatlich','quartalsweise','pro Stelle','pro Neueinstellung','pro Austritt'], value:'wöchentlich'},
   ], 'Gold-Hebel speichern', function(v){
     pushUndo();
-    const role = DATA.roles.find(function(r){ return r.person===person; });
-    if(!role) return;
-    if(!role.goldhebel) role.goldhebel = [];
-    role.goldhebel.push({ id: person+'_gh_'+uid(), category: v.category||null, title: v.title, detail: v.detail, rhythm: v.rhythm, quarter: personQuarterSel });
-    saveAndRerender();
+    const k = {
+      id: uid(), person: person, owner: v.owner, metric: v.title, detailText: v.detail||null,
+      type: 'goldhebel', category: v.category||null, cadence: goldhebelCadence({rhythm:v.rhythm}), direction: 'high',
+      gut:null, ok:null, off:null, gutLabel:null, okLabel:null, offLabel:null, ziel:null, okNum:null,
+      rhythm: v.rhythm, datenquelle:null, dataSourceType:'manual', quarter: fullQuarter(personQuarterSel), status:'active', weekly: {}
+    };
+    DATA.kpis.push(k);
+    rerenderAll();
+    persistKpi(k);
   });
 }
-function deleteGoldhebel(person, id){
-  pushUndo();
-  const role = DATA.roles.find(function(r){ return r.person===person; });
-  if(!role) return;
-  role.goldhebel = role.goldhebel.filter(function(g){ return g.id!==id; });
-  saveAndRerender();
-}
-function editGoldhebel(person, id){
-  const role = DATA.roles.find(function(r){ return r.person===person; });
-  if(!role) return;
-  const g = role.goldhebel.find(function(x){ return x.id===id; });
+function editGoldhebel(id){
+  const g = DATA.kpis.find(function(x){ return x.id===id; });
   if(!g) return;
-  const isRich = !!g.title;
   openModal('Gold-Hebel bearbeiten', '', [
     {key:'category', label:'Kategorie (optional)', value:g.category||''},
-    {key:'title', label:'Aktivität', value: isRich ? g.title : g.text, required:true},
-    {key:'detail', label:'Detail/Beschreibung', type:'textarea', rows:2, value:g.detail||''},
+    {key:'title', label:'Aktivität', value:g.metric, required:true},
+    ownerSelectField('Zuständig/Owner', 'owner', g.owner, g.person),
+    {key:'detail', label:'Detail/Beschreibung', type:'textarea', rows:2, value:g.detailText||''},
     {key:'rhythm', label:'Rhythmus', type:'select', options:['wöchentlich','täglich','monatlich','quartalsweise','pro Stelle','pro Neueinstellung','pro Austritt'], value:g.rhythm||'wöchentlich'},
-    {key:'quarter', label:'Quartal', type:'select', options:['Q2','Q3'], value:g.quarter||'Q3'},
   ], 'Speichern', function(v){
     pushUndo();
     g.category = v.category || null;
-    g.title = v.title;
-    g.detail = v.detail || null;
+    g.metric = v.title;
+    g.owner = v.owner;
+    g.detailText = v.detail || null;
     g.rhythm = v.rhythm;
-    g.quarter = v.quarter;
-    delete g.text; // altes flaches Format bereinigen, falls vorhanden
-    saveAndRerender();
+    g.cadence = goldhebelCadence({rhythm:v.rhythm});
+    rerenderAll();
+    persistKpi(g);
   });
 }
 
 function renderPersonDetail(person){
   const el = document.getElementById('person-detail');
   const role = DATA.roles.find(function(r){ return r.person===person; });
-  const rocksQ1 = DATA.rocks.filter(function(r){ return r.person===person && r.quarter==='Q1'; });
-  const rocksQ2 = DATA.rocks.filter(function(r){ return r.person===person && r.quarter==='Q2'; });
-  const rocksQ3 = DATA.rocks.filter(function(r){ return r.person===person && r.quarter==='Q3'; });
-  const kpis = DATA.kpis.filter(function(k){ return k.person===person; });
+  const rocksQ1 = DATA.rocks.filter(function(r){ return r.person===person && quarterCode(r.quarter)==='Q1'; });
+  const rocksQ2 = DATA.rocks.filter(function(r){ return r.person===person && quarterCode(r.quarter)==='Q2'; });
+  const rocksQ3 = DATA.rocks.filter(function(r){ return r.person===person && quarterCode(r.quarter)==='Q3'; });
+  const kpis = DATA.kpis.filter(function(k){ return k.person===person && k.status==='active' && quarterCode(k.quarter)===personQuarterSel; });
 
   let roleHtml = '';
   if(role && role.hasDoc){
-    const q3Focus = role.q3_focus ? '<div class="info-box" style="margin-bottom:10px;"><b>Q3-Fokus:</b> '+role.q3_focus+'</div>' : '';
-    const q3Stand = role.q3_stand ? '<div class="card-sub" style="margin-top:6px;">Quelle: '+role.q3_stand+'</div>' : '';
-    const q3Diag = (role.q3_diagnose && role.q3_diagnose.length) ? (
-      '<div class="breadcrumb" style="margin-top:10px;">Beobachtungsmetriken (Diagnose, keine Ziel-KPI)</div><ul class="plain">'+role.q3_diagnose.map(function(d){return '<li>'+d+'</li>';}).join('')+'</ul>'
+    const notes = (role.quarterNotes||[]).find(function(n){ return quarterCode(n.quarter)===personQuarterSel; });
+    const focusHtml = (notes && notes.focus) ? '<div class="info-box" style="margin-bottom:10px;"><b>'+personQuarterSel+'-Fokus:</b> '+notes.focus+'</div>' : '';
+    const standHtml = (notes && notes.stand) ? '<div class="card-sub" style="margin-top:6px;">Quelle: '+notes.stand+'</div>' : '';
+    const diagHtml = (notes && notes.diagnose && notes.diagnose.length) ? (
+      '<div class="breadcrumb" style="margin-top:10px;">Beobachtungsmetriken (Diagnose, keine Ziel-KPI)</div><ul class="plain">'+notes.diagnose.map(function(d){return '<li>'+d+'</li>';}).join('')+'</ul>'
     ) : '';
-    const gh = role.goldhebel || [];
-    const ghSelected = gh.filter(function(g){ return g.quarter===personQuarterSel; });
-    const ghOther = gh.filter(function(g){ return g.quarter!==personQuarterSel; });
-    function ghRow(g){
-      if(g.title){
-        return '<div class="goldhebel-card">'+
-          '<div class="gh-card-head"><span class="gh-card-title">'+g.title+'</span>'+(g.rhythm?'<span class="badge badge-light">'+g.rhythm+'</span>':'')+'<button class="del-btn" title="bearbeiten" style="color:var(--gold-hover);" onclick="editGoldhebel(\''+person+'\',\''+g.id+'\')">✎</button><button class="del-btn" title="löschen" onclick="deleteGoldhebel(\''+person+'\',\''+g.id+'\')">✕</button></div>'+
-          (g.detail?'<div class="gh-card-detail">→ '+g.detail+'</div>':'')+
-          renderGoldhebelWeeklyPanel(person, g, personQuarterSel)+
-        '</div>';
-      }
-      return '<div class="goldhebel-row"><span class="gh-text">'+g.text+'</span><button class="del-btn" title="bearbeiten" style="color:var(--gold-hover);" onclick="editGoldhebel(\''+person+'\',\''+g.id+'\')">✎</button><button class="del-btn" title="löschen" onclick="deleteGoldhebel(\''+person+'\',\''+g.id+'\')">✕</button></div>';
-    }
-    function ghGrouped(list){
-      const cats = [];
-      const byCat = {};
-      list.forEach(function(g){
-        const c = g.category || null;
-        if(!(c in byCat)){ byCat[c]=[]; cats.push(c); }
-        byCat[c].push(g);
-      });
-      return cats.map(function(c){
-        const heading = c ? '<div class="gh-category">'+c+'</div>' : '';
-        return heading + byCat[c].map(ghRow).join('');
-      }).join('');
-    }
-    const ghSelectedHtml = ghSelected.length ? ghGrouped(ghSelected) : '';
-    const ghOtherOpen = isOpen('ghother-'+person+'-'+personQuarterSel);
-    const ghOtherHtml = ghOther.length ? (
-      '<button class="gh-toggle" onclick="togglePanel(\'ghother-'+person+'-'+personQuarterSel+'\', this.nextElementSibling)">Gold-Hebel aus anderen Zeiträumen ein-/ausblenden ('+ghOther.length+')</button>'+
-      '<div class="gh-q2-block'+(ghOtherOpen?' open':'')+'">'+ghGrouped(ghOther)+'</div>'
-    ) : '';
-    // Gold-Hebel MIT Wochentracking (z. B. aus GWYW-Scorecard-Dateien) — eigene Zeilen mit Sparkline
-    const ghNumeric = kpis.filter(function(k){ return k.type==='goldhebel' && k.quarters.indexOf(personQuarterSel)!==-1; });
-    const ghNumericHtml = ghNumeric.length ? ghNumeric.map(function(k){ return renderKpiRow(k, personQuarterSel); }).join('') : '';
-    const noGoldhebelAtAll = !ghSelected.length && !ghNumeric.length;
+    // Gold-Hebel sind seit Phase 2 normale kpis-Zeilen mit type='goldhebel' — ein einziger Anzeigepfad,
+    // egal ob rein textbasiert (kein Wochenwert eingetragen) oder mit Wochentracking.
+    const goldhebel = kpis.filter(function(k){ return k.type==='goldhebel'; });
+    const goldhebelHtml = goldhebel.length ? groupByCategory(goldhebel, function(k){ return renderKpiRow(k, personQuarterSel); }, 'GOLD-HEBEL') : '<div class="placeholder-box">Noch keine Gold-Hebel für '+personQuarterSel+' hinterlegt.</div>';
     roleHtml = '<div class="card"><div class="card-head"><div><div class="card-title">'+role.title+'</div></div></div>'+
-      q3Focus+
+      focusHtml+
       '<p style="font-size:12.5px; font-style:italic; margin-bottom:10px;">'+role.mission+'</p>'+
       '<div class="breadcrumb">Domänen</div><ul class="plain">'+role.domains.map(function(d){return '<li>'+d+'</li>';}).join('')+'</ul>'+
       '<div class="breadcrumb" style="margin-top:10px;">Gold-Hebel — '+personQuarterSel+' <span style="font-weight:400; color:var(--darkgrey);">(Aktivitäten, die zum Erfolg führen)</span></div>'+
-      (noGoldhebelAtAll ? '<div class="placeholder-box">Noch keine Gold-Hebel für '+personQuarterSel+' hinterlegt.</div>' : '')+
-      ghSelectedHtml+
-      ghNumericHtml+
-      ghOtherHtml+
+      goldhebelHtml+
       '<button class="add-btn" style="margin-top:10px;" onclick="addGoldhebel(\''+person+'\')">+ Gold-Hebel hinzufügen</button>'+
-      q3Diag+
-      q3Stand+
+      diagHtml+
+      standHtml+
     '</div>';
   } else {
     roleHtml = '<div class="placeholder-box">Keine Rollen-Scorecard hinterlegt für '+person+' ('+(role?role.title:'–')+') — Rollenbeschreibung fehlt oder ist veraltet, bitte ergänzen.</div>';
@@ -1765,7 +1785,7 @@ function renderPersonDetail(person){
   }
 
   let kpiHtml = '';
-  const kpisForQuarter = kpis.filter(function(k){ return k.quarters.indexOf(personQuarterSel)!==-1 && k.type==='kpi'; });
+  const kpisForQuarter = kpis.filter(function(k){ return k.type==='kpi'; });
   if(kpisForQuarter.length){
     kpiHtml = groupByCategory(kpisForQuarter, function(k){ return renderKpiRow(k, personQuarterSel); });
   } else {
@@ -1774,9 +1794,9 @@ function renderPersonDetail(person){
 
   el.innerHTML =
     '<div class="section-label">Rollen-Scorecard &amp; Gold-Hebel</div>'+roleHtml+
-    '<div class="section-label">Rocks — Q1 2026 (abgeschlossen)</div>'+rockAccordion(rocksQ1,'Q1')+
-    '<div class="section-label">Rocks — Q2 2026 (laufend)</div>'+rockAccordion(rocksQ2,'Q2')+
-    '<div class="section-label">Rocks — Q3 2026 (neu)</div>'+rockAccordion(rocksQ3,'Q3')+
+    '<div class="section-label">Rocks — Q1 '+CURRENT_YEAR+' (abgeschlossen)</div>'+rockAccordion(rocksQ1,'Q1')+
+    '<div class="section-label">Rocks — Q2 '+CURRENT_YEAR+' (laufend)</div>'+rockAccordion(rocksQ2,'Q2')+
+    '<div class="section-label">Rocks — Q3 '+CURRENT_YEAR+' (neu)</div>'+rockAccordion(rocksQ3,'Q3')+
     '<div class="section-label">KPIs <span style="font-size:11px; color:var(--darkgrey); font-weight:400;">— Ergebnis- &amp; Prozesszahlen, Zeitraum: '+
       '<select onchange="personQuarterSel=this.value; renderPersonDetail(currentPerson); saveViewState();" style="font-size:11px;">'+
         '<option value="Q1" '+(personQuarterSel==='Q1'?'selected':'')+'>Q1</option>'+
@@ -1792,8 +1812,8 @@ function populateFilterSelects(){
   const kfP = document.getElementById('kf-person');
   const opts = '<option value="ALL">Alle</option>' + ALL_PEOPLE.map(function(p){ return '<option value="'+p+'">'+p+'</option>'; }).join('');
   rfP.innerHTML = opts; kfP.innerHTML = opts;
-  [rfP, document.getElementById('rf-quarter'), document.getElementById('rf-status')].forEach(function(s){ s.addEventListener('change', renderRocksOverview); });
-  [kfP, document.getElementById('kf-quarter'), document.getElementById('kf-cadence'), document.getElementById('kf-type')].forEach(function(s){ s.addEventListener('change', renderKpiOverview); });
+  [rfP, document.getElementById('rf-quarter'), document.getElementById('rf-status'), document.getElementById('rf-archived')].forEach(function(s){ s.addEventListener('change', renderRocksOverview); });
+  [kfP, document.getElementById('kf-quarter'), document.getElementById('kf-cadence'), document.getElementById('kf-type'), document.getElementById('kf-archived')].forEach(function(s){ s.addEventListener('change', renderKpiOverview); });
   [document.getElementById('if-quarter'), document.getElementById('if-archived')].forEach(function(s){ s.addEventListener('change', renderOperativ); });
 }
 
@@ -1827,10 +1847,13 @@ function renderRocksOverview(){
   const person = document.getElementById('rf-person').value;
   const quarter = document.getElementById('rf-quarter').value;
   const status = document.getElementById('rf-status').value;
+  const archived = document.getElementById('rf-archived') ? document.getElementById('rf-archived').value : 'NO';
   let rocks = DATA.rocks.slice();
   if(person!=='ALL') rocks = rocks.filter(function(r){ return r.person===person; });
-  if(quarter!=='ALL') rocks = rocks.filter(function(r){ return r.quarter===quarter; });
+  if(quarter!=='ALL') rocks = rocks.filter(function(r){ return quarterCode(r.quarter)===quarter; });
   if(status!=='ALL') rocks = rocks.filter(function(r){ return rockLatestStatus(r)===status; });
+  if(archived==='NO') rocks = rocks.filter(function(r){ return r.status!=='archived'; });
+  if(archived==='YES') rocks = rocks.filter(function(r){ return r.status==='archived'; });
   rocks.sort(function(a,b){ return a.quarter.localeCompare(b.quarter) || a.person.localeCompare(b.person); });
 
   const el = document.getElementById('rocks-overview-list');
@@ -1838,6 +1861,7 @@ function renderRocksOverview(){
   el.innerHTML = rocks.map(function(rock){
     const st = rockLatestStatus(rock);
     const weeks = qWeeks(rock.quarter);
+    const archivedBadge = rock.status==='archived' ? ' <span class="badge badge-light">archiviert</span>' : '';
     const krsHtml = rock.krs.map(function(kr){
       const dots = weeks.map(function(n){
         const raw = kr.weekly[wk(n)]; const s = normStatus(raw);
@@ -1848,38 +1872,15 @@ function renderRocksOverview(){
     return (
       '<div class="card" style="margin-bottom:10px;">'+
         '<div class="card-head">'+
-          '<div><span class="badge badge-dark">'+rock.quarter+'</span> <span class="card-title" style="margin-left:8px; font-size:14px;">'+rock.objective+'</span><div class="card-sub">'+rock.person+'</div></div>'+
+          '<div><span class="badge badge-dark">'+rock.quarter+'</span> <span class="card-title" style="margin-left:8px; font-size:14px;">'+rock.objective+archivedBadge+'</span><div class="card-sub">'+rock.person+'</div></div>'+
           statusBadge(st)+
         '</div>'+
         '<p style="font-size:12px; color:#555; margin:8px 0;">'+rock.hypothese+'</p>'+krsHtml+
         '<button class="add-btn" style="margin-top:10px; margin-right:8px; background:var(--gold-hover); color:#fff;" onclick="editRock(\''+rock.id+'\')">✎ Rock bearbeiten</button>'+
-        '<button class="del-btn" style="margin-top:10px; border:1px solid var(--red30);" onclick="deleteRock(\''+rock.id+'\')">✕ Rock löschen</button>'+
+        '<button class="del-btn" title="'+(rock.status==='archived'?'aus Archiv holen':'archivieren')+'" style="margin-top:10px; border:1px solid var(--gold30); color:var(--gold-hover);" onclick="toggleArchiveRock(\''+rock.id+'\')">'+(rock.status==='archived'?'📤 wiederherstellen':'📦 archivieren')+'</button>'+
       '</div>'
     );
   }).join('');
-}
-
-function renderGoldhebelCardForOverview(person, g, quarter){
-  const label = '<div class="card-sub" style="margin-bottom:2px;">'+person+(g.category?' · '+g.category:'')+'</div>';
-  if(g.title){
-    return '<div class="goldhebel-card">'+label+
-      '<div class="gh-card-head"><span class="gh-card-title">'+g.title+'</span>'+(g.rhythm?'<span class="badge badge-light">'+g.rhythm+'</span>':'')+'<button class="del-btn" title="bearbeiten" style="color:var(--gold-hover);" onclick="editGoldhebel(\''+person+'\',\''+g.id+'\')">✎</button><button class="del-btn" title="löschen" onclick="deleteGoldhebel(\''+person+'\',\''+g.id+'\')">✕</button></div>'+
-      (g.detail?'<div class="gh-card-detail">→ '+g.detail+'</div>':'')+
-      renderGoldhebelWeeklyPanel(person, g, quarter)+
-    '</div>';
-  }
-  return '<div class="goldhebel-card">'+label+'<div class="gh-card-head"><span class="gh-card-title">'+g.text+'</span><button class="del-btn" title="bearbeiten" style="color:var(--gold-hover);" onclick="editGoldhebel(\''+person+'\',\''+g.id+'\')">✎</button><button class="del-btn" title="löschen" onclick="deleteGoldhebel(\''+person+'\',\''+g.id+'\')">✕</button></div>'+renderGoldhebelWeeklyPanel(person, g, quarter)+'</div>';
-}
-
-function collectTextGoldhebel(person, quarter){
-  const out = [];
-  DATA.roles.forEach(function(r){
-    if(person!=='ALL' && r.person!==person) return;
-    (r.goldhebel||[]).forEach(function(g){
-      if(g.quarter===quarter) out.push({person:r.person, g:g});
-    });
-  });
-  return out;
 }
 
 function renderKpiOverview(){
@@ -1888,18 +1889,17 @@ function renderKpiOverview(){
   const quarter = document.getElementById('kf-quarter').value;
   const cadence = document.getElementById('kf-cadence').value;
   const type = document.getElementById('kf-type').value;
+  const archived = document.getElementById('kf-archived') ? document.getElementById('kf-archived').value : 'NO';
   let kpis = DATA.kpis.slice();
   if(person!=='ALL') kpis = kpis.filter(function(k){ return k.person===person; });
-  kpis = kpis.filter(function(k){ return k.quarters.indexOf(quarter)!==-1; });
+  kpis = kpis.filter(function(k){ return quarterCode(k.quarter)===quarter; });
   if(cadence!=='ALL') kpis = kpis.filter(function(k){ return (k.cadence||'weekly')===cadence; });
+  if(archived==='NO') kpis = kpis.filter(function(k){ return k.status!=='archived'; });
+  if(archived==='YES') kpis = kpis.filter(function(k){ return k.status==='archived'; });
   kpis.sort(function(a,b){ return a.person.localeCompare(b.person) || a.metric.localeCompare(b.metric); });
 
-  // textbasierte Gold-Hebel (Rollen-Scorecard) — nur relevant, wenn Rhythmus-Filter nicht aktiv eingeschränkt ist,
-  // da diese kein festes Wöchentlich/Monatlich/Quartalsweise-Raster im gleichen Sinn haben
-  const textGh = (type!=='kpi') ? collectTextGoldhebel(person, quarter).filter(function(x){ return cadence==='ALL' || goldhebelCadence(x.g)===cadence; }) : [];
-
   const el = document.getElementById('kpi-overview-list');
-  const numericGh = kpis.filter(function(k){ return (k.type||'kpi')==='goldhebel'; });
+  const goldhebelItems = kpis.filter(function(k){ return (k.type||'kpi')==='goldhebel'; });
   const kpiItems = kpis.filter(function(k){ return (k.type||'kpi')==='kpi'; });
 
   if(type==='kpi'){
@@ -1909,21 +1909,20 @@ function renderKpiOverview(){
   }
 
   if(type==='goldhebel'){
-    if(!numericGh.length && !textGh.length){ el.innerHTML = '<div class="placeholder-box">Keine Gold-Hebel für '+quarter+' bei dieser Auswahl.</div>'; return; }
-    el.innerHTML = numericGh.map(function(k){ return renderKpiRow(k, quarter); }).join('') + textGh.map(function(x){ return renderGoldhebelCardForOverview(x.person, x.g, quarter); }).join('');
+    if(!goldhebelItems.length){ el.innerHTML = '<div class="placeholder-box">Keine Gold-Hebel für '+quarter+' bei dieser Auswahl.</div>'; return; }
+    el.innerHTML = goldhebelItems.map(function(k){ return renderKpiRow(k, quarter); }).join('');
     return;
   }
 
   // type === 'ALL'
-  if(!numericGh.length && !textGh.length && !kpiItems.length){
-    el.innerHTML = '<div class="placeholder-box">Keine Einträge für '+quarter+' bei dieser Auswahl — für Q3 zählen nur die neu übernommenen Werte, nicht die alten Q1/Q2-Messgrößen.</div>';
+  if(!goldhebelItems.length && !kpiItems.length){
+    el.innerHTML = '<div class="placeholder-box">Keine Einträge für '+quarter+' bei dieser Auswahl.</div>';
     return;
   }
   let html = '';
-  if(numericGh.length || textGh.length){
+  if(goldhebelItems.length){
     html += '<div class="breadcrumb" style="font-size:13px; margin-bottom:6px;"><b>Gold-Hebel</b> — Aktivitäten, die zum Erfolg führen</div>';
-    html += numericGh.map(function(k){ return renderKpiRow(k, quarter); }).join('');
-    html += textGh.map(function(x){ return renderGoldhebelCardForOverview(x.person, x.g, quarter); }).join('');
+    html += goldhebelItems.map(function(k){ return renderKpiRow(k, quarter); }).join('');
   }
   if(kpiItems.length){
     html += '<div class="breadcrumb" style="font-size:13px; margin:16px 0 6px;"><b>KPIs</b> — Ergebnis- &amp; Prozesszahlen</div>';
@@ -1953,22 +1952,12 @@ async function refreshData(manual){
   }
   if(btn) btn.textContent = '⏳ Aktualisiere...';
   try{
-    const { data, error } = await sb.from('dashboard_state').select('data').eq('id','main').single();
-    if(error) throw error;
-    if(data && data.data && Object.keys(data.data).length){
-      DATA = data.data;
-      migrateNewPeople(DATA);
-      migrateRemovedPeople(DATA);
-      migrateSeedSync(DATA);
-      migrateKatharinaSplit(DATA);
-      migrateZielFixes(DATA);
-      migrateTypeFixes(DATA);
-      renderPersonChips();
-      renderPersonDetail(currentPerson);
-      renderRocksOverview();
-      renderKpiOverview();
-      renderOperativ();
-    }
+    DATA = await fetchAllData();
+    renderPersonChips();
+    renderPersonDetail(currentPerson);
+    renderRocksOverview();
+    renderKpiOverview();
+    renderOperativ();
     lastRefreshAt = new Date();
     storageAvailable = true;
     updateShareNote();
