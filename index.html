@@ -1703,7 +1703,7 @@ function renderKpiRow(k, quarter){
       '<div class="kpi-meta"><div class="kpi-name">'+k.metric+archivedBadge+'</div><div class="kpi-sub2">'+subline+'</div>'+detailLine+'</div>'+
       '<div class="kpi-spark">'+spark+'</div>'+
       '<div class="kpi-latest">'+(latest?latest.value:'–')+' '+arrow+'</div>'+
-      '<button class="kpi-expand-btn" onclick="togglePanel(\''+rowId+'\', document.getElementById(\''+rowId+'\'))">'+cadenceLabel+'</button>'+
+      '<button class="kpi-expand-btn" onclick="togglePanel(\''+rowId+'\', this.parentElement.querySelector(\'.kpi-edit-panel\'))">'+cadenceLabel+'</button>'+
       '<button class="del-btn" title="bearbeiten" style="color:var(--gold-hover);" onclick="editKpi(\''+k.id+'\')">✎</button>'+
       '<button class="del-btn" title="'+(k.status==='archived'?'aus Archiv holen':'archivieren')+'" onclick="toggleArchiveKpi(\''+k.id+'\')">'+(k.status==='archived'?'📤':'📦')+'</button>'+
       '<div class="kpi-edit-panel'+(isOpen(rowId)?' open':'')+'" id="'+rowId+'"><div class="kpi-input-grid">'+inputs+'</div></div>'+
