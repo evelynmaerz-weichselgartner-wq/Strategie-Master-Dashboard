@@ -982,7 +982,7 @@ function persistKpiValue(kpiId, periodKey, value, isNumeric){
   if(!hasStorage()) return Promise.resolve();
   if(value===''||value===null||value===undefined) return sb.from('kpi_values').delete().eq('kpi_id', kpiId).eq('period_key', periodKey).then(reportSaveResult);
   const row = { kpi_id: kpiId, period_key: periodKey, source: 'manual' };
-  if(isNumeric===false){ row.value_text = value; row.value_numeric = null; } else { row.value_numeric = parseFloat(value); row.value_text = null; }
+  if(isNumeric===false){ row.value_text = value; row.value_numeric = null; } else { row.value_numeric = parseDecimal(value); row.value_text = null; }
   return sb.from('kpi_values').upsert(row, { onConflict: 'kpi_id,period_key' }).then(reportSaveResult);
 }
 function persistOperationalItem(row){
@@ -1160,7 +1160,7 @@ function openModal(title, subtitle, fields, submitLabel, onSubmit){
       const opts = f.options.map(function(o){ return '<option value="'+o+'"'+(o===f.value?' selected':'')+'>'+o+'</option>'; }).join('');
       return '<div class="modal-field"><label>'+f.label+'</label><select id="mf-'+f.key+'">'+opts+'</select></div>';
     }
-    return '<div class="modal-field"><label>'+f.label+'</label><input id="mf-'+f.key+'" type="'+(f.type||'text')+'" value="'+(f.value||'')+'" placeholder="'+(f.placeholder||'')+'"></div>';
+    return '<div class="modal-field"><label>'+f.label+'</label><input id="mf-'+f.key+'" type="'+(f.type||'text')+'" '+(f.inputmode?'inputmode="'+f.inputmode+'"':'')+' value="'+(f.value||'')+'" placeholder="'+(f.placeholder||'')+'"></div>';
   }).join('');
   box.innerHTML =
     '<h3>'+title+'</h3>'+
@@ -1450,6 +1450,14 @@ function deleteIdea(id){
   deleteOperationalItemRow(id);
 }
 
+// Deutsches Komma als Dezimaltrennzeichen tolerieren ("4,6" -> 4.6). Wird ueberall verwendet,
+// wo Nutzer Zahlen eintippen — <input type="number"> lehnt Kommas je nach Browser/Locale
+// stillschweigend ab (Feld bleibt leer, kein Fehler), was wie "kann nichts eintragen" wirkt.
+// Deshalb laufen diese Felder als type="text" mit inputmode="decimal" und parsen hier tolerant.
+function parseDecimal(str){
+  if(str===null || str===undefined || str==='') return NaN;
+  return parseFloat(String(str).replace(',', '.'));
+}
 // Liest die erste Zahl aus einem Zielkorridor-Text ("≥ 80%" -> 80, "10–20%" -> 10, "≤ 55 Tage" -> 55).
 function parseLeadingNumber(str){
   if(typeof str !== 'string') return null;
@@ -1666,15 +1674,19 @@ function renderKpiRow(k, quarter){
   const hasCorridor = !!(k.gut || k.ok || k.off);
   const corridorIsCategorical = hasCorridor && parseLeadingNumber(k.gut)===null && parseLeadingNumber(k.ok)===null && parseLeadingNumber(k.off)===null;
   const isNumeric = !corridorIsCategorical;
-  const inputType = isNumeric ? 'number' : 'text';
+  // Bewusst type="text" statt type="number": Zahlen-Inputs lehnen ein deutsches Komma
+  // ("4,6") je nach Browser stillschweigend ab (Feld bleibt leer, kein Fehler) - das sah
+  // aus wie "kann nichts eintragen". inputmode="decimal" zeigt trotzdem die Zifferntastatur
+  // auf Mobilgeraeten, parseDecimal() beim Speichern akzeptiert Komma und Punkt gleichermassen.
+  const inputAttrs = isNumeric ? 'type="text" inputmode="decimal"' : 'type="text"';
   const inputs = periods.map(function(p){
     const v = weeklyForDisplay[p];
     const vv = (v!==undefined && v!==null) ? v : '';
     const editable = !isQuarterly || p===k.quarter;
     if(!editable){
-      return '<div class="kpi-input-cell"><label>'+periodLabel(p)+'</label><input type="'+inputType+'" value="'+vv+'" disabled style="opacity:.55;" title="Vorheriges Quartal — zum Bearbeiten dort ansehen"></div>';
+      return '<div class="kpi-input-cell"><label>'+periodLabel(p)+'</label><input '+inputAttrs+' value="'+vv+'" disabled style="opacity:.55;" title="Vorheriges Quartal — zum Bearbeiten dort ansehen"></div>';
     }
-    return '<div class="kpi-input-cell"><label>'+periodLabel(p)+'</label><input type="'+inputType+'" '+(isNumeric?'step="any"':'')+' value="'+vv+'" onchange="setKpiValue(\''+k.id+'\',\''+p+'\',this.value,'+isNumeric+')"></div>';
+    return '<div class="kpi-input-cell"><label>'+periodLabel(p)+'</label><input '+inputAttrs+' value="'+vv+'" onchange="setKpiValue(\''+k.id+'\',\''+p+'\',this.value,'+isNumeric+')"></div>';
   }).join('');
   const archivedBadge = k.status==='archived' ? ' <span class="badge badge-light">archiviert</span>' : '';
   const ownerLine = (k.owner && k.owner!==k.person) ? ' <span style="color:var(--darkgrey);">· Owner: '+k.owner+'</span>' : '';
@@ -1703,7 +1715,7 @@ function setKpiValue(kpiId, week, value, isNumeric){
   pushUndo();
   const k = DATA.kpis.find(function(k){ return k.id===kpiId; });
   if(!k) return;
-  if(value===''){ delete k.weekly[week]; } else { k.weekly[week] = (isNumeric===false) ? value : parseFloat(value); }
+  if(value===''){ delete k.weekly[week]; } else { k.weekly[week] = (isNumeric===false) ? value : parseDecimal(value); }
   rerenderAll();
   persistKpiValue(kpiId, week, value, isNumeric);
 }
@@ -1745,7 +1757,7 @@ function editKpi(kpiId){
     {key:'gut', label:'GUT (Zielkorridor, optional)', value:k.gut||''},
     {key:'ok', label:'OK (Zielkorridor, optional)', value:k.ok||''},
     {key:'off', label:'OFF (Zielkorridor, optional)', value:k.off||''},
-    {key:'ziel', label:isCorridor?'Ziel-Zahl für Sparkline (optional, numerisch)':'Ziel (Zahl, optional)', value:(k.ziel!==null&&k.ziel!==undefined?k.ziel:''), type:'number'},
+    {key:'ziel', label:isCorridor?'Ziel-Zahl für Sparkline (optional, numerisch)':'Ziel (Zahl, optional)', value:(k.ziel!==null&&k.ziel!==undefined?k.ziel:''), type:'text', inputmode:'decimal'},
     {key:'direction', label:'Richtung', type:'select', options:['höher = besser','niedriger = besser'], value:(k.direction==='low'?'niedriger = besser':'höher = besser')},
     {key:'rhythm', label:'Rhythmus-Anzeige (Text, z. B. "wöchentlich · GA4")', value:k.rhythm||''},
     {key:'datenquelle', label:'Datenquelle (optional)', value:k.datenquelle||''},
@@ -1760,7 +1772,7 @@ function editKpi(kpiId){
     k.gut = v.gut || null;
     k.ok = v.ok || null;
     k.off = v.off || null;
-    k.ziel = v.ziel!=='' ? parseFloat(v.ziel) : null;
+    k.ziel = v.ziel!=='' ? parseDecimal(v.ziel) : null;
     k.direction = v.direction==='niedriger = besser' ? 'low' : 'high';
     k.rhythm = v.rhythm || null;
     k.datenquelle = v.datenquelle || null;
@@ -1792,11 +1804,11 @@ function addKpi(person){
     {key:'metric', label:'Name der Messgröße', required:true},
     ownerSelectField('Zuständig/Owner', 'owner', null, person),
     {key:'category', label:'Kategorie (optional)', placeholder:'optional'},
-    {key:'ziel', label:'Ziel (Zahl, optional)', type:'number'},
+    {key:'ziel', label:'Ziel (Zahl, optional)', type:'text', inputmode:'decimal'},
     {key:'cadence', label:'Rhythmus', type:'select', options:['wöchentlich','monatlich','quartalsweise'], value:'wöchentlich'},
   ], 'Speichern', function(v){
     pushUndo();
-    const ziel = v.ziel ? parseFloat(v.ziel) : null;
+    const ziel = v.ziel ? parseDecimal(v.ziel) : null;
     const cadence = cadenceFromDe(v.cadence);
     const type = v.type==='KPI' ? 'kpi' : 'goldhebel';
     const k = {
@@ -1818,13 +1830,13 @@ function addGoldhebel(person){
     ownerSelectField('Zuständig/Owner', 'owner', null, person),
     {key:'detail', label:'Detail/Beschreibung', type:'textarea', rows:2, placeholder:'optional'},
     {key:'rhythm', label:'Rhythmus', type:'select', options:['wöchentlich','täglich','monatlich','quartalsweise','pro Stelle','pro Neueinstellung','pro Austritt'], value:'wöchentlich'},
-    {key:'ziel', label:'Ziel pro Zeitraum (Zahl, optional — steuert die farbliche Bewertung)', type:'number', placeholder:'z. B. 2'},
+    {key:'ziel', label:'Ziel pro Zeitraum (Zahl, optional — steuert die farbliche Bewertung)', type:'text', inputmode:'decimal', placeholder:'z. B. 2'},
   ], 'Gold-Hebel speichern', function(v){
     pushUndo();
     const k = {
       id: uid(), person: person, owner: v.owner, metric: v.title, detailText: v.detail||null,
       type: 'goldhebel', category: v.category||null, cadence: goldhebelCadence({rhythm:v.rhythm}), direction: 'high',
-      gut:null, ok:null, off:null, gutLabel:null, okLabel:null, offLabel:null, ziel: v.ziel!=='' ? parseFloat(v.ziel) : null, okNum:null,
+      gut:null, ok:null, off:null, gutLabel:null, okLabel:null, offLabel:null, ziel: v.ziel!=='' ? parseDecimal(v.ziel) : null, okNum:null,
       rhythm: v.rhythm, datenquelle:null, dataSourceType:'manual', quarter: fullQuarter(personQuarterSel), status:'active', weekly: {}
     };
     DATA.kpis.push(k);
@@ -1841,7 +1853,7 @@ function editGoldhebel(id){
     ownerSelectField('Zuständig/Owner', 'owner', g.owner, g.person),
     {key:'detail', label:'Detail/Beschreibung', type:'textarea', rows:2, value:g.detailText||''},
     {key:'rhythm', label:'Rhythmus', type:'select', options:['wöchentlich','täglich','monatlich','quartalsweise','pro Stelle','pro Neueinstellung','pro Austritt'], value:g.rhythm||'wöchentlich'},
-    {key:'ziel', label:'Ziel pro Zeitraum (Zahl, optional — steuert die farbliche Bewertung)', type:'number', value:(g.ziel!==null&&g.ziel!==undefined?g.ziel:''), placeholder:'z. B. 2'},
+    {key:'ziel', label:'Ziel pro Zeitraum (Zahl, optional — steuert die farbliche Bewertung)', type:'text', inputmode:'decimal', value:(g.ziel!==null&&g.ziel!==undefined?g.ziel:''), placeholder:'z. B. 2'},
   ], 'Speichern', function(v){
     pushUndo();
     g.category = v.category || null;
@@ -1850,7 +1862,7 @@ function editGoldhebel(id){
     g.detailText = v.detail || null;
     g.rhythm = v.rhythm;
     g.cadence = goldhebelCadence({rhythm:v.rhythm});
-    g.ziel = v.ziel!=='' ? parseFloat(v.ziel) : null;
+    g.ziel = v.ziel!=='' ? parseDecimal(v.ziel) : null;
     rerenderAll();
     persistKpi(g);
   });
