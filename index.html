@@ -1658,7 +1658,14 @@ function renderKpiRow(k, quarter){
   const arrow = trendArrow(periods, weeklyForDisplay);
   const rowId = 'kpi-'+k.id;
   const cadenceLabel = {weekly:'wöchentlich erfassen',monthly:'monatlich erfassen',quarterly:'einmal pro Quartal erfassen'}[cadence];
-  const isNumeric = (k.ziel!==null && k.ziel!==undefined) || (typeof k.okNum === 'number');
+  // Numerisch ist der Normalfall. Nur wenn ein GUT/OK/OFF-Korridor hinterlegt ist, der sich
+  // NICHT als Zahl lesen laesst (z.B. "Ja, alle"/"Teilweise"/"Nein"), ist die Kennzahl echt
+  // kategorisch und bekommt ein Textfeld. Vorher haengte das faelschlich an k.ziel — dadurch
+  // wurden Werte, die VOR dem Setzen eines Ziels eingetragen wurden, als Text statt Zahl
+  // gespeichert und blieben dadurch grau, weil sie sich nicht mehr farblich bewerten liessen.
+  const hasCorridor = !!(k.gut || k.ok || k.off);
+  const corridorIsCategorical = hasCorridor && parseLeadingNumber(k.gut)===null && parseLeadingNumber(k.ok)===null && parseLeadingNumber(k.off)===null;
+  const isNumeric = !corridorIsCategorical;
   const inputType = isNumeric ? 'number' : 'text';
   const inputs = periods.map(function(p){
     const v = weeklyForDisplay[p];
