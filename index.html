@@ -72,6 +72,10 @@
   .accordion-item { border-bottom:1px solid var(--gold30); padding:9px 0; }
   .rock-card-static { background:var(--white); border:1px solid var(--gold30); padding:12px 14px; margin-bottom:10px; }
   .rock-card-title { font-family:'Vidaloka',serif; font-size:14.5px; font-weight:400; color:var(--black); }
+  .rock-progress { display:flex; align-items:center; gap:8px; margin:2px 0 10px; }
+  .rock-progress-bar { flex:1; height:10px; background:var(--lightgrey); border:1px solid var(--gold30); overflow:hidden; }
+  .rock-progress-fill { height:100%; background:var(--gold); transition:width .2s; }
+  .rock-progress-input { width:44px; font-family:'Palanquin',sans-serif; font-size:12px; padding:3px 4px; border:1px solid var(--gold30); text-align:right; }
   .accordion-item:last-child { border-bottom:none; }
   .accordion-head { display:flex; justify-content:space-between; align-items:center; cursor:pointer; font-weight:700; font-size:13px; gap:10px; }
   .accordion-head .lbl { flex:1; }
@@ -911,6 +915,7 @@ async function fetchAllData(){
     return {
       id: r.id, person: PERSON_NAME_BY_ID[r.person_id], quarter: r.quarter,
       objective: r.objective, hypothese: r.hypothesis, status: r.status || 'active', closed: r.closed_result || null,
+      progress: (r.progress_pct!==null && r.progress_pct!==undefined) ? Number(r.progress_pct) : null,
       krs: krsByRock[r.id] || []
     };
   });
@@ -961,7 +966,8 @@ function persistRock(rock){
   return sb.from('rocks').upsert({
     id: rock.id, person_id: personIdOrWarn(rock.person), quarter: rock.quarter,
     objective: rock.objective, hypothesis: rock.hypothese, status: rock.status || 'active',
-    closed_result: rock.closed || null, updated_at: new Date().toISOString()
+    closed_result: rock.closed || null, progress_pct: (rock.progress!==undefined && rock.progress!==null) ? rock.progress : null,
+    updated_at: new Date().toISOString()
   }, { onConflict: 'id' }).then(reportSaveResult);
 }
 function persistKeyResult(kr, rockId, sortOrder){
@@ -1590,6 +1596,34 @@ function renderPersonChips(){
   el.querySelectorAll('.person-chip').forEach(function(b){ b.addEventListener('click', function(){ currentPerson=b.dataset.p; renderPersonChips(); renderPersonDetail(currentPerson); saveViewState(); }); });
 }
 
+// Manueller Fortschritt (0-100%), bewusst getrennt vom woechentlichen On/At Risk/Off-Status:
+// der Status sagt "laeuft's gut", der Fortschritt sagt "wie weit bin ich tatsaechlich" -
+// beides kann auseinanderfallen (z.B. 90% Status-Historie "on", aber inhaltlich haengt es
+// kurz vor Schluss). Da Key Results reiner Text ohne Zahlen sind, laesst sich das nicht
+// automatisch berechnen, deshalb eine einfache manuelle Prozent-Eingabe pro Rock.
+function renderRockProgressBar(rock){
+  const hasValue = rock.progress!==null && rock.progress!==undefined;
+  const pct = hasValue ? rock.progress : 0;
+  return '<div class="rock-progress">'+
+      '<div class="rock-progress-bar"><div class="rock-progress-fill" style="width:'+pct+'%;"></div></div>'+
+      '<input type="text" inputmode="decimal" class="rock-progress-input" value="'+(hasValue?pct:'')+'" placeholder="–" title="Fortschritt in % (manuell)" onchange="setRockProgress(\''+rock.id+'\',this.value)">'+
+      '<span style="font-size:11px; color:var(--darkgrey);">% Fortschritt</span>'+
+    '</div>';
+}
+function setRockProgress(rockId, value){
+  pushUndo();
+  const rock = DATA.rocks.find(function(r){ return r.id===rockId; });
+  if(!rock) return;
+  if(value===''){
+    rock.progress = null;
+  } else {
+    const n = parseDecimal(value);
+    if(isNaN(n)) return;
+    rock.progress = Math.max(0, Math.min(100, n));
+  }
+  rerenderAll();
+  persistRock(rock);
+}
 function renderRockCard(rock){
   const weeks = qWeeks(rock.quarter);
   const rockYear = quarterYear(rock.quarter);
@@ -1612,6 +1646,7 @@ function renderRockCard(rock){
     '<div class="rock-card-static">'+
       '<div class="rock-card-title">'+rock.objective+archivedBadge+'</div>'+
       '<p style="font-size:12px; color:#555; margin:6px 0 10px;">'+rock.hypothese+'</p>'+
+      renderRockProgressBar(rock)+
       closedInfo+
       '<div class="breadcrumb" style="margin-top:10px;">Key Results — Wochenstatus '+rock.quarter+' (Feld anklicken zum Ändern)</div>'+
       krHtml+
@@ -2024,7 +2059,7 @@ function renderRocksOverview(){
           '<div><span class="badge badge-dark">'+rock.quarter+'</span> <span class="card-title" style="margin-left:8px; font-size:14px;">'+rock.objective+archivedBadge+'</span><div class="card-sub">'+rock.person+'</div></div>'+
           statusBadge(st)+
         '</div>'+
-        '<p style="font-size:12px; color:#555; margin:8px 0;">'+rock.hypothese+'</p>'+krsHtml+
+        '<p style="font-size:12px; color:#555; margin:8px 0;">'+rock.hypothese+'</p>'+renderRockProgressBar(rock)+krsHtml+
         '<button class="add-btn" style="margin-top:10px; margin-right:8px; background:var(--gold-hover); color:#fff;" onclick="editRock(\''+rock.id+'\')">✎ Rock bearbeiten</button>'+
         '<button class="del-btn" title="'+(rock.status==='archived'?'aus Archiv holen':'archivieren')+'" style="margin-top:10px; border:1px solid var(--gold30); color:var(--gold-hover);" onclick="toggleArchiveRock(\''+rock.id+'\')">'+(rock.status==='archived'?'📤 wiederherstellen':'📦 archivieren')+'</button>'+
       '</div>'
