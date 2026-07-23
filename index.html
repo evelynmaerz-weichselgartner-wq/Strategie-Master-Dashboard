@@ -135,6 +135,9 @@
   .gh-q2-block.open { display:block; }
   .gh-category { font-family:'Palanquin',sans-serif; font-weight:700; font-size:11px; letter-spacing:.04em; text-transform:uppercase; color:var(--gold-hover); margin:14px 0 4px; }
   .gh-category:first-child { margin-top:2px; }
+  .person-group { border:1px solid var(--gold30); border-top:3px solid var(--gold); margin-bottom:16px; padding:0 14px 6px; }
+  .person-group:last-child { margin-bottom:0; }
+  .person-group-header { font-family:'Vidaloka',serif; font-size:14px; font-weight:400; color:var(--black); margin:0 -14px 6px; padding:9px 14px; background:var(--gold30); }
   .goldhebel-card { background:var(--lightgrey); padding:9px 12px; margin-bottom:6px; }
   .gh-card-head { display:flex; align-items:center; gap:8px; }
   .gh-card-title { flex:1; font-size:12.5px; font-weight:700; }
@@ -778,6 +781,20 @@ function groupByCategory(items, rowFn, labelSuffix){
   return cats.map(function(c){
     const heading = c ? '<div class="gh-category">'+c.toUpperCase()+'-'+(labelSuffix||'KPIS')+'</div>' : '';
     return heading + byCat[c].map(rowFn).join('');
+  }).join('');
+}
+// Fasst Zeilen visuell nach Person zusammen (Ueberschrift + Einrahmung) — fuer die "Alle
+// Personen"-Ansicht in der KPI-Uebersicht, damit es nicht zu einer unuebersichtlichen
+// Endlosliste wird. Erwartet, dass `items` schon nach Person sortiert ist.
+function groupByPerson(items, rowFn){
+  const persons = [];
+  const byPerson = {};
+  items.forEach(function(it){
+    if(!(it.person in byPerson)){ byPerson[it.person]=[]; persons.push(it.person); }
+    byPerson[it.person].push(it);
+  });
+  return persons.map(function(p){
+    return '<div class="person-group"><div class="person-group-header">'+p+'</div>'+byPerson[p].map(rowFn).join('')+'</div>';
   }).join('');
 }
 function normStatus(raw){
@@ -2036,13 +2053,13 @@ function renderKpiOverview(){
 
   if(type==='kpi'){
     if(!kpiItems.length){ el.innerHTML = '<div class="placeholder-box">Keine KPIs für '+quarter+' bei dieser Auswahl.</div>'; return; }
-    el.innerHTML = (person!=='ALL') ? groupByCategory(kpiItems, function(k){ return renderKpiRow(k, quarter); }) : kpiItems.map(function(k){ return renderKpiRow(k, quarter); }).join('');
+    el.innerHTML = (person!=='ALL') ? groupByCategory(kpiItems, function(k){ return renderKpiRow(k, quarter); }) : groupByPerson(kpiItems, function(k){ return renderKpiRow(k, quarter); });
     return;
   }
 
   if(type==='goldhebel'){
     if(!goldhebelItems.length){ el.innerHTML = '<div class="placeholder-box">Keine Gold-Hebel für '+quarter+' bei dieser Auswahl.</div>'; return; }
-    el.innerHTML = goldhebelItems.map(function(k){ return renderKpiRow(k, quarter); }).join('');
+    el.innerHTML = (person!=='ALL') ? goldhebelItems.map(function(k){ return renderKpiRow(k, quarter); }).join('') : groupByPerson(goldhebelItems, function(k){ return renderKpiRow(k, quarter); });
     return;
   }
 
@@ -2054,11 +2071,11 @@ function renderKpiOverview(){
   let html = '';
   if(goldhebelItems.length){
     html += '<div class="breadcrumb" style="font-size:13px; margin-bottom:6px;"><b>Gold-Hebel</b> — Aktivitäten, die zum Erfolg führen</div>';
-    html += goldhebelItems.map(function(k){ return renderKpiRow(k, quarter); }).join('');
+    html += (person!=='ALL') ? goldhebelItems.map(function(k){ return renderKpiRow(k, quarter); }).join('') : groupByPerson(goldhebelItems, function(k){ return renderKpiRow(k, quarter); });
   }
   if(kpiItems.length){
     html += '<div class="breadcrumb" style="font-size:13px; margin:16px 0 6px;"><b>KPIs</b> — Ergebnis- &amp; Prozesszahlen</div>';
-    html += (person!=='ALL') ? groupByCategory(kpiItems, function(k){ return renderKpiRow(k, quarter); }) : kpiItems.map(function(k){ return renderKpiRow(k, quarter); }).join('');
+    html += (person!=='ALL') ? groupByCategory(kpiItems, function(k){ return renderKpiRow(k, quarter); }) : groupByPerson(kpiItems, function(k){ return renderKpiRow(k, quarter); });
   }
   el.innerHTML = html;
 }
